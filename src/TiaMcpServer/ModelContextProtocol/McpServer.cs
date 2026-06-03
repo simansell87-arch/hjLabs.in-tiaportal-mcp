@@ -4363,8 +4363,31 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetHmiTagTables(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetHmiTagTables(softwarePath, regexName);
+                var items = new List<ResponseHmiTagTableInfo>();
+                foreach (var obj in list)
+                {
+                    var eo = obj as global::Siemens.Engineering.IEngineeringObject;
+                    string name = "";
+                    int? tagCount = null;
+                    if (obj is global::Siemens.Engineering.Hmi.Tag.TagTable tt)
+                    {
+                        name = tt.Name;
+                        try { tagCount = tt.Tags.Count; } catch { }
+                    }
+                    items.Add(new ResponseHmiTagTableInfo
+                    {
+                        Name = name,
+                        TagCount = tagCount,
+                        Attributes = eo != null ? Helper.GetAttributeList(eo) : null
+                    });
+                }
+                return new ResponseHmiTagTables
+                {
+                    Message = $"HMI tag tables retrieved from '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
             }
             catch (Exception ex) when (ex is not McpException)
             {
@@ -4380,8 +4403,34 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetHmiTags(softwarePath, tagTableName, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetHmiTags(softwarePath, tagTableName, regexName);
+                var items = new List<ResponseHmiTagInfo>();
+                foreach (var obj in list)
+                {
+                    var eo = obj as global::Siemens.Engineering.IEngineeringObject;
+                    string name = "";
+                    string? connection = null;
+                    string? plcTag = null;
+                    if (eo != null)
+                    {
+                        try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                        try { connection = eo.GetAttribute("Connection")?.ToString(); } catch { }
+                        try { plcTag = eo.GetAttribute("PlcTag")?.ToString(); } catch { }
+                    }
+                    items.Add(new ResponseHmiTagInfo
+                    {
+                        Name = name,
+                        Connection = connection,
+                        PlcTag = plcTag,
+                        Attributes = eo != null ? Helper.GetAttributeList(eo) : null
+                    });
+                }
+                return new ResponseHmiTags
+                {
+                    Message = $"HMI tags retrieved from '{tagTableName}' in '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
             }
             catch (TiaMcpServer.Siemens.PortalException pex)
             {
@@ -4510,8 +4559,40 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetScreens(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetScreens(softwarePath, regexName);
+
+                var items = new List<ResponseScreenInfo>();
+                foreach (var obj in list)
+                {
+                    if (obj is global::Siemens.Engineering.IEngineeringObject eo)
+                    {
+                        string name = "";
+                        try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+
+                        items.Add(new ResponseScreenInfo
+                        {
+                            Name = name,
+                            ScreenType = obj.GetType().Name,
+                            Attributes = Helper.GetAttributeList(eo)
+                        });
+                    }
+                }
+
+                return new ResponseScreens
+                {
+                    Message = $"HMI screens retrieved from '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true,
+                        ["count"] = items.Count
+                    }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"Failed retrieving HMI screens from '{softwarePath}': {pex.Message}", pex, McpErrorCode.InternalError);
             }
             catch (Exception ex) when (ex is not McpException)
             {
@@ -4656,8 +4737,32 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetHmiConnections(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetHmiConnections(softwarePath, regexName);
+                var items = new List<ResponseHmiConnectionInfo>();
+                foreach (var obj in list)
+                {
+                    var eo = obj as global::Siemens.Engineering.IEngineeringObject;
+                    string name = "";
+                    string? partner = null;
+                    if (eo != null)
+                    {
+                        try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                        try { partner = eo.GetAttribute("Partner")?.ToString(); } catch { }
+                    }
+                    items.Add(new ResponseHmiConnectionInfo
+                    {
+                        Name = name,
+                        Partner = partner,
+                        ConnectionType = null,
+                        Attributes = eo != null ? Helper.GetAttributeList(eo) : null
+                    });
+                }
+                return new ResponseHmiConnections
+                {
+                    Message = $"HMI connections retrieved from '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
             }
             catch (Exception ex) when (ex is not McpException)
             {

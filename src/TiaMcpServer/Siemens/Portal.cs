@@ -4722,12 +4722,106 @@ namespace TiaMcpServer.Siemens
 
         public List<object> GetHmiTagTables(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting HMI tag tables...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var list = new List<object>();
+            CollectHmiTagTables(hmi.TagFolder.TagTables, hmi.TagFolder.Folders, list, regexName);
+            return list;
+        }
+
+        private void CollectHmiTagTables(
+            global::Siemens.Engineering.Hmi.Tag.TagTableComposition tables,
+            global::Siemens.Engineering.Hmi.Tag.TagUserFolderComposition folders,
+            List<object> list,
+            string regexName)
+        {
+            if (tables != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Tag.TagTable table in tables)
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(regexName) && !Regex.IsMatch(table.Name, regexName, RegexOptions.IgnoreCase))
+                        {
+                            continue;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+
+                    list.Add(table);
+                }
+            }
+
+            if (folders != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Tag.TagUserFolder folder in folders)
+                {
+                    CollectHmiTagTables(folder.TagTables, folder.Folders, list, regexName);
+                }
+            }
         }
 
         public List<object> GetHmiTags(string softwarePath, string tagTableName, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting HMI tags...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var tables = new List<object>();
+            CollectHmiTagTables(hmi.TagFolder.TagTables, hmi.TagFolder.Folders, tables, "");
+
+            var table = tables
+                .OfType<global::Siemens.Engineering.Hmi.Tag.TagTable>()
+                .FirstOrDefault(t => t.Name.Equals(tagTableName, StringComparison.OrdinalIgnoreCase));
+
+            if (table == null)
+            {
+                var names = tables.OfType<global::Siemens.Engineering.Hmi.Tag.TagTable>().Select(t => t.Name);
+                throw new PortalException(PortalErrorCode.NotFound, $"HMI tag table '{tagTableName}' not found", names);
+            }
+
+            var list = new List<object>();
+            foreach (global::Siemens.Engineering.Hmi.Tag.Tag tag in table.Tags)
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(regexName) && !Regex.IsMatch(tag.Name, regexName, RegexOptions.IgnoreCase))
+                    {
+                        continue;
+                    }
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                list.Add(tag);
+            }
+
+            return list;
         }
 
         public void ExportHmiTagTable(string softwarePath, string tagTableName, string exportPath)
@@ -4746,7 +4840,57 @@ namespace TiaMcpServer.Siemens
 
         public List<object> GetScreens(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting HMI screens...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var list = new List<object>();
+            CollectScreens(hmi.ScreenFolder.Screens, hmi.ScreenFolder.Folders, list, regexName);
+            return list;
+        }
+
+        private void CollectScreens(
+            global::Siemens.Engineering.Hmi.Screen.ScreenComposition screens,
+            global::Siemens.Engineering.Hmi.Screen.ScreenUserFolderComposition folders,
+            List<object> list,
+            string regexName)
+        {
+            if (screens != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Screen.Screen screen in screens)
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(regexName) && !Regex.IsMatch(screen.Name, regexName, RegexOptions.IgnoreCase))
+                        {
+                            continue;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+
+                    list.Add(screen);
+                }
+            }
+
+            if (folders != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Screen.ScreenUserFolder folder in folders)
+                {
+                    CollectScreens(folder.Screens, folder.Folders, list, regexName);
+                }
+            }
         }
 
         public object? GetScreenByName(string softwarePath, string screenName)
@@ -4775,7 +4919,41 @@ namespace TiaMcpServer.Siemens
 
         public List<object> GetHmiConnections(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting HMI connections...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var list = new List<object>();
+            if (hmi.Connections != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Communication.Connection connection in hmi.Connections)
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(regexName) && !Regex.IsMatch(connection.Name, regexName, RegexOptions.IgnoreCase))
+                        {
+                            continue;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+
+                    list.Add(connection);
+                }
+            }
+
+            return list;
         }
 
         public void CreateHmiConnection(string softwarePath, string connectionName, string partnerDevicePath)

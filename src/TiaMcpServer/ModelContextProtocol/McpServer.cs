@@ -1222,6 +1222,37 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "GetTypeCode"), Description("Get the definition of a PLC data type (UDT) as readable text. Exports the type internally; it must be consistent (compiled).")]
+        public static ResponseBlockCode GetTypeCode(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("typePath: full path to the UDT in the project structure, e.g. 'Group/Subgroup/Name'")] string typePath)
+        {
+            try
+            {
+                var code = Portal.GetTypeCode(softwarePath, typePath);
+                return new ResponseBlockCode
+                {
+                    Message = $"Type definition retrieved from '{typePath}' in '{softwarePath}'",
+                    ProgrammingLanguage = "UDT",
+                    Code = code,
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true,
+                        ["length"] = code?.Length ?? 0
+                    }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"Failed to get type code from '{typePath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error getting type code from '{typePath}' in '{softwarePath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         [McpServerTool(Name = "GetBlocks"), Description("Get a list of blocks, which are located in plc software")]
         public static ResponseBlocks GetBlocks(
             [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,

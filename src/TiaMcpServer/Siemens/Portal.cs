@@ -1324,6 +1324,29 @@ namespace TiaMcpServer.Siemens
         /// Exports a block and returns its code: reconstructed source text for SCL/STL,
         /// or a per-network instruction/operand summary for LAD/FBD/GRAPH.
         /// </summary>
+        // Replaces characters that are illegal in Windows file names (e.g. ':' '/' '\\')
+        // so block/type names like "Norm:20ftWS" can be exported to a file.
+        private static string SanitizeFileName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "_";
+            foreach (var c in Path.GetInvalidFileNameChars())
+            {
+                name = name.Replace(c, '_');
+            }
+            return name;
+        }
+
+        // Sanitizes each segment of a '/'-separated group path and joins them as a
+        // Windows relative path, so group names with illegal characters still work.
+        private static string SanitizeRelativePath(string groupPath)
+        {
+            if (string.IsNullOrEmpty(groupPath)) return string.Empty;
+            var segments = groupPath
+                .Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(SanitizeFileName);
+            return string.Join("\\", segments);
+        }
+
         public (string Language, string Code) GetBlockCode(string softwarePath, string blockPath)
         {
             _logger?.LogInformation($"Getting block code: {blockPath}");
@@ -1505,31 +1528,88 @@ namespace TiaMcpServer.Siemens
 
         private string SummarizeFlgNet(XElement flgNet)
         {
-            var instructions = new List<string>();
-            foreach (var part in flgNet.Descendants().Where(e => e.Name.LocalName == "Part"))
+            // 1) Map each Access UId to its reconstructed operand text.
+            var accessByUid = new Dictionary<string, string>();
+            foreach (var acc in flgNet.Descendants().Where(e => e.Name.LocalName == "Access"))
             {
-                var n = part.Attribute("Name")?.Value;
-                if (!string.IsNullOrEmpty(n)) instructions.Add(n);
-            }
-            foreach (var call in flgNet.Descendants().Where(e => e.Name.LocalName == "Call"))
-            {
-                var ci = call.Descendants().FirstOrDefault(e => e.Name.LocalName == "CallInfo");
-                if (ci != null)
+                var uid = acc.Attribute("UId")?.Value;
+                if (!string.IsNullOrEmpty(uid) && !accessByUid.ContainsKey(uid))
                 {
-                    instructions.Add($"CALL {ci.Attribute("BlockType")?.Value} \"{ci.Attribute("Name")?.Value}\"");
+                    accessByUid[uid] = ReconstructAccess(acc);
                 }
             }
 
-            var operands = flgNet.Descendants()
-                .Where(e => e.Name.LocalName == "Access")
-                .Select(ReconstructAccess)
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Distinct()
-                .ToList();
+            // 2) From wires, attach operands to the part/call pins they feed.
+            // A wire that links an IdentCon (an Access) to a NameCon (a part pin)
+            // means that operand is wired to that named pin.
+            var pinsByPart = new Dictionary<string, List<string>>();
+            foreach (var wire in flgNet.Descendants().Where(e => e.Name.LocalName == "Wire"))
+            {
+                var connectors = wire.Elements().ToList();
 
+                string operand = null;
+                foreach (var c in connectors.Where(c => c.Name.LocalName == "IdentCon"))
+                {
+                    var au = c.Attribute("UId")?.Value;
+                    if (au != null && accessByUid.TryGetValue(au, out var op))
+                    {
+                        operand = op;
+                    }
+                }
+                if (operand == null) continue;
+
+                foreach (var nc in connectors.Where(c => c.Name.LocalName == "NameCon"))
+                {
+                    var pu = nc.Attribute("UId")?.Value;
+                    var pin = nc.Attribute("Name")?.Value;
+                    if (string.IsNullOrEmpty(pu)) continue;
+                    if (!pinsByPart.TryGetValue(pu, out var list))
+                    {
+                        list = new List<string>();
+                        pinsByPart[pu] = list;
+                    }
+                    list.Add($"{pin}={operand}");
+                }
+            }
+
+            // 3) Emit one line per instruction (Part/Call) in document order,
+            // annotated with the operands wired to its pins.
             var sb = new StringBuilder();
-            sb.AppendLine($"//   Instructions: {(instructions.Count > 0 ? string.Join(", ", instructions) : "(none)")}");
-            sb.AppendLine($"//   Operands: {(operands.Count > 0 ? string.Join(", ", operands) : "(none)")}");
+            var parts = flgNet.Descendants().FirstOrDefault(e => e.Name.LocalName == "Parts");
+            if (parts == null)
+            {
+                sb.AppendLine("//   (empty network)");
+                return sb.ToString();
+            }
+
+            foreach (var el in parts.Elements())
+            {
+                var uid = el.Attribute("UId")?.Value;
+                string label;
+                if (el.Name.LocalName == "Part")
+                {
+                    label = el.Attribute("Name")?.Value ?? "Part";
+                }
+                else if (el.Name.LocalName == "Call")
+                {
+                    var ci = el.Descendants().FirstOrDefault(e => e.Name.LocalName == "CallInfo");
+                    label = $"CALL {ci?.Attribute("BlockType")?.Value} \"{ci?.Attribute("Name")?.Value}\"";
+                }
+                else
+                {
+                    continue; // skip Access and other non-instruction elements
+                }
+
+                if (uid != null && pinsByPart.TryGetValue(uid, out var pins) && pins.Count > 0)
+                {
+                    sb.AppendLine($"//   {label}({string.Join(", ", pins)})");
+                }
+                else
+                {
+                    sb.AppendLine($"//   {label}");
+                }
+            }
+
             return sb.ToString();
         }
 
@@ -1547,6 +1627,94 @@ namespace TiaMcpServer.Siemens
 
             var text = mlt.Descendants().FirstOrDefault(e => e.Name.LocalName == "Text");
             return text?.Value?.Trim() ?? string.Empty;
+        }
+
+        /// <summary>
+        /// Exports a PLC data type (UDT) and reconstructs its definition as readable text.
+        /// </summary>
+        public string GetTypeCode(string softwarePath, string typePath)
+        {
+            _logger?.LogInformation($"Getting type code: {typePath}");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var type = GetType(softwarePath, typePath);
+            if (type == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"Type not found at '{typePath}'");
+            }
+
+            if (!type.IsConsistent)
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "Type is inconsistent (not compiled); compile it before reading its definition.");
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_typecode_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                var file = Path.Combine(tempDir, "type.xml");
+                try
+                {
+                    type.Export(new FileInfo(file), ExportOptions.None);
+                }
+                catch (Exception ex)
+                {
+                    throw new PortalException(PortalErrorCode.ExportFailed, $"Failed to export type '{typePath}': {ex.Message}", null, ex);
+                }
+
+                var doc = XDocument.Load(file);
+                return ReconstructTypeDefinition(doc, type.Name);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private string ReconstructTypeDefinition(XDocument doc, string typeName)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"TYPE \"{typeName}\"");
+            sb.AppendLine("   STRUCT");
+
+            var interfaceEl = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "Interface");
+            var section = interfaceEl?.Descendants().FirstOrDefault(e => e.Name.LocalName == "Section");
+            if (section != null)
+            {
+                ReconstructTypeMembers(section, sb, 2);
+            }
+
+            sb.AppendLine("   END_STRUCT;");
+            sb.AppendLine("END_TYPE");
+            return sb.ToString();
+        }
+
+        private void ReconstructTypeMembers(XElement parent, StringBuilder sb, int indentLevel)
+        {
+            var indent = new string(' ', indentLevel * 3);
+            foreach (var member in parent.Elements().Where(e => e.Name.LocalName == "Member"))
+            {
+                var name = member.Attribute("Name")?.Value ?? "";
+                var dt = member.Attribute("Datatype")?.Value ?? "";
+                var nested = member.Elements().Where(e => e.Name.LocalName == "Member").ToList();
+
+                if (nested.Count > 0 && dt.StartsWith("Struct", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"{indent}{name} : Struct");
+                    ReconstructTypeMembers(member, sb, indentLevel + 1);
+                    sb.AppendLine($"{indent}END_STRUCT;");
+                }
+                else
+                {
+                    var start = member.Elements().FirstOrDefault(e => e.Name.LocalName == "StartValue")?.Value;
+                    var startText = string.IsNullOrEmpty(start) ? "" : $" := {start}";
+                    sb.AppendLine($"{indent}{name} : {dt}{startText};");
+                }
+            }
         }
 
         #endregion
@@ -1666,11 +1834,11 @@ namespace TiaMcpServer.Siemens
                         groupPath = GetPlcBlockGroupPath(parentGroup);
                     }
 
-                    exportPath = Path.Combine(exportPath, groupPath.Replace('/', '\\'), $"{block.Name}.xml");
+                    exportPath = Path.Combine(exportPath, SanitizeRelativePath(groupPath), $"{SanitizeFileName(block.Name)}.xml");
                 }
                 else
                 {
-                    exportPath = Path.Combine(exportPath, $"{block.Name}.xml");
+                    exportPath = Path.Combine(exportPath, $"{SanitizeFileName(block.Name)}.xml");
                 }
 
                 // TIA Portal never exports inconsistent blocks
@@ -1734,11 +1902,11 @@ namespace TiaMcpServer.Siemens
                         groupPath = GetPlcTypeGroupPath(parentGroup);
                     }
 
-                    exportPath = Path.Combine(exportPath, groupPath.Replace('/', '\\'), $"{type.Name}.xml");
+                    exportPath = Path.Combine(exportPath, SanitizeRelativePath(groupPath), $"{SanitizeFileName(type.Name)}.xml");
                 }
                 else
                 {
-                    exportPath = Path.Combine(exportPath, $"{type.Name}.xml");
+                    exportPath = Path.Combine(exportPath, $"{SanitizeFileName(type.Name)}.xml");
                 }
 
                 if (File.Exists(exportPath))
@@ -1895,11 +2063,11 @@ namespace TiaMcpServer.Siemens
                     {
                         groupPath = GetPlcBlockGroupPath(parentGroup);
                     }
-                    path = Path.Combine(exportPath, groupPath.Replace('/', '\\'), $"{block.Name}.xml");
+                    path = Path.Combine(exportPath, SanitizeRelativePath(groupPath), $"{SanitizeFileName(block.Name)}.xml");
                 }
                 else
                 {
-                    path = Path.Combine(exportPath, $"{block.Name}.xml");
+                    path = Path.Combine(exportPath, $"{SanitizeFileName(block.Name)}.xml");
                 }
 
                 try
@@ -2017,11 +2185,11 @@ namespace TiaMcpServer.Siemens
                     {
                         groupPath = GetPlcTypeGroupPath(parentGroup);
                     }
-                    path = Path.Combine(exportPath, groupPath.Replace('/', '\\'), $"{type.Name}.xml");
+                    path = Path.Combine(exportPath, SanitizeRelativePath(groupPath), $"{SanitizeFileName(type.Name)}.xml");
                 }
                 else
                 {
-                    path = Path.Combine(exportPath, $"{type.Name}.xml");
+                    path = Path.Combine(exportPath, $"{SanitizeFileName(type.Name)}.xml");
                 }
 
                 try
@@ -2234,7 +2402,7 @@ namespace TiaMcpServer.Siemens
                     var groupPath = GetPlcBlockGroupPath(parentGroup);
                     if (!string.IsNullOrWhiteSpace(groupPath))
                     {
-                        targetDir = Path.Combine(exportPath, groupPath.Replace('/', '\\'));
+                        targetDir = Path.Combine(exportPath, SanitizeRelativePath(groupPath));
                     }
                 }
 

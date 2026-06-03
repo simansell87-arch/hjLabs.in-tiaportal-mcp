@@ -570,10 +570,28 @@ namespace TiaMcpServer.Siemens
                     GetDevicesRecursive(group, list, regexName);
                 }
 
-                //foreach (var group in _project.UngroupedDevicesGroup)
-                //{
-                //    GetDevicesRecursive(_project.UngroupedDevicesGroup, list, regexName);
-                //}
+                // Ungrouped devices live in a DeviceSystemGroup (flat, no user subgroups),
+                // so iterate its Devices directly rather than via GetDevicesRecursive.
+                if (_project?.UngroupedDevicesGroup?.Devices != null)
+                {
+                    foreach (Device device in _project.UngroupedDevicesGroup.Devices)
+                    {
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(regexName) && !Regex.IsMatch(device.Name, regexName, RegexOptions.IgnoreCase))
+                            {
+                                continue; // Skip this device if it doesn't match the pattern
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Invalid regex pattern, skip this device
+                            continue;
+                        }
+
+                        list.Add(device);
+                    }
+                }
             }
 
             return list;

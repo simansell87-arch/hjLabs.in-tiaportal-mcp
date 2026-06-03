@@ -1,0 +1,22 @@
+<Project>
+
+  <!--
+    Robust resolution of the TIA Portal Openness assemblies at build time.
+
+    The Siemens.Collaboration.Net.TiaPortal.Packages.Openness package resolves
+    Siemens.Engineering.* references from "$(TiaPortalLocation)\PublicAPI\V<major>".
+    Its registry fallback only kicks in when TiaPortalLocation is empty OR does not
+    exist. On some machines the machine-level TiaPortalLocation environment variable
+    points at the 32-bit folder ("C:\Program Files (x86)\Siemens\Automation\Portal V20"),
+    which exists but contains no PublicAPI directory. That defeats the fallback and the
+    build fails with ~120 CS0246 "type not found" errors.
+
+    Here we override TiaPortalLocation to the standard 64-bit install whenever the
+    current value does not contain a PublicAPI directory. A correct, explicitly set
+    TiaPortalLocation (or a -p:TiaPortalLocation=... on the command line) is respected.
+  -->
+  <PropertyGroup>
+    <TiaPortalLocation Condition="'$(TiaPortalLocation)' == '' OR !Exists('$(TiaPortalLocation)\PublicAPI')">C:\Program Files\Siemens\Automation\Portal V20</TiaPortalLocation>
+  </PropertyGroup>
+
+</Project>

@@ -1191,6 +1191,37 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "GetBlockCode"), Description("Get the code of a block: reconstructed SCL/STL source text, or a per-network instruction/operand summary for LAD/FBD. Exports the block internally; the block must be consistent (compiled) and not know-how protected.")]
+        public static ResponseBlockCode GetBlockCode(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("blockPath: full path to the block in the project structure, e.g. 'Group/Subgroup/Name'")] string blockPath)
+        {
+            try
+            {
+                var (language, code) = Portal.GetBlockCode(softwarePath, blockPath);
+                return new ResponseBlockCode
+                {
+                    Message = $"Code retrieved from '{blockPath}' in '{softwarePath}'",
+                    ProgrammingLanguage = language,
+                    Code = code,
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true,
+                        ["length"] = code?.Length ?? 0
+                    }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"Failed to get block code from '{blockPath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error getting block code from '{blockPath}' in '{softwarePath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         [McpServerTool(Name = "GetBlocks"), Description("Get a list of blocks, which are located in plc software")]
         public static ResponseBlocks GetBlocks(
             [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,

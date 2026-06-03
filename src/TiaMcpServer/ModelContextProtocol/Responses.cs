@@ -547,6 +547,13 @@ namespace TiaMcpServer.ModelContextProtocol
     {
     }
 
+    public class ResponseBlockCode : ResponseMessage
+    {
+        public string? Name { get; set; }
+        public string? ProgrammingLanguage { get; set; }
+        public string? Code { get; set; }
+    }
+
     public class ResponseScreenInfo : ResponseAttributes
     {
         public string? Name { get; set; }

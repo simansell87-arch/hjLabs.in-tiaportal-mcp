@@ -28,6 +28,7 @@ using System.Net;
 using System.Security;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace TiaMcpServer.Siemens
 {
@@ -1316,6 +1317,239 @@ namespace TiaMcpServer.Siemens
 
             return block.Name;
         }
+
+        #region block code
+
+        /// <summary>
+        /// Exports a block and returns its code: reconstructed source text for SCL/STL,
+        /// or a per-network instruction/operand summary for LAD/FBD/GRAPH.
+        /// </summary>
+        public (string Language, string Code) GetBlockCode(string softwarePath, string blockPath)
+        {
+            _logger?.LogInformation($"Getting block code: {blockPath}");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_blockcode_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                var block = GetBlock(softwarePath, blockPath);
+                if (block == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Block not found at '{blockPath}'");
+                }
+
+                if (!block.IsConsistent)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "Block is inconsistent (not compiled); compile it before reading its code.");
+                }
+
+                var lang = Enum.GetName(typeof(ProgrammingLanguage), block.ProgrammingLanguage) ?? block.ProgrammingLanguage.ToString();
+
+                // Use a filesystem-safe fixed filename. Block names may contain ':' or '/'
+                // (e.g. "Norm:PresureSwitchPN7071"), which are illegal in Windows paths and
+                // would otherwise make the export fail. The temp dir is unique per call.
+                var file = Path.Combine(tempDir, "block.xml");
+                try
+                {
+                    block.Export(new FileInfo(file), ExportOptions.None);
+                }
+                catch (Exception ex)
+                {
+                    throw new PortalException(PortalErrorCode.ExportFailed, $"Failed to export block '{blockPath}' for code reconstruction: {ex.Message}", null, ex);
+                }
+
+                var doc = XDocument.Load(file);
+                var code = ReconstructBlockCode(doc, lang);
+                return (lang, code);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private string ReconstructBlockCode(XDocument doc, string fallbackLang)
+        {
+            var compileUnits = doc.Descendants().Where(e => e.Name.LocalName == "SW.Blocks.CompileUnit").ToList();
+            if (compileUnits.Count == 0)
+            {
+                return "(No code networks in this block - it is likely a data block (DB) or interface-only block.)";
+            }
+
+            var sb = new StringBuilder();
+            int networkNumber = 0;
+            foreach (var cu in compileUnits)
+            {
+                networkNumber++;
+                var lang = cu.Descendants().FirstOrDefault(e => e.Name.LocalName == "ProgrammingLanguage")?.Value ?? fallbackLang;
+
+                var structuredText = cu.Descendants().FirstOrDefault(e => e.Name.LocalName == "StructuredText");
+                var flgNet = cu.Descendants().FirstOrDefault(e => e.Name.LocalName == "FlgNet");
+
+                if (structuredText != null)
+                {
+                    // Text languages (SCL / STL): reconstruct the source verbatim.
+                    // In multi-network blocks (e.g. a LAD block with embedded SCL networks),
+                    // add a header so each network's source is clearly delimited and titled.
+                    if (compileUnits.Count > 1)
+                    {
+                        var stTitle = GetMultilingualText(cu, "Title");
+                        var stComment = GetMultilingualText(cu, "Comment");
+                        sb.AppendLine();
+                        sb.AppendLine($"// ===== Network {networkNumber}{(string.IsNullOrEmpty(stTitle) ? "" : ": " + stTitle)} [{lang}] =====");
+                        if (!string.IsNullOrEmpty(stComment))
+                        {
+                            sb.AppendLine($"// {stComment}");
+                        }
+                    }
+
+                    sb.Append(ReconstructStructuredText(structuredText));
+                    if (sb.Length > 0 && sb[sb.Length - 1] != '\n')
+                    {
+                        sb.AppendLine();
+                    }
+                }
+                else if (flgNet != null)
+                {
+                    // Graphical languages (LAD / FBD): summarize each network.
+                    var title = GetMultilingualText(cu, "Title");
+                    var comment = GetMultilingualText(cu, "Comment");
+                    sb.AppendLine();
+                    sb.AppendLine($"// ===== Network {networkNumber}{(string.IsNullOrEmpty(title) ? "" : ": " + title)} [{lang}] =====");
+                    if (!string.IsNullOrEmpty(comment))
+                    {
+                        sb.AppendLine($"// {comment}");
+                    }
+                    sb.Append(SummarizeFlgNet(flgNet));
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private string ReconstructStructuredText(XElement st)
+        {
+            var sb = new StringBuilder();
+            AppendStTokens(st, sb);
+            return sb.ToString();
+        }
+
+        private void AppendStTokens(XElement parent, StringBuilder sb)
+        {
+            foreach (var el in parent.Elements())
+            {
+                switch (el.Name.LocalName)
+                {
+                    case "Token":
+                        sb.Append(el.Attribute("Text")?.Value);
+                        break;
+                    case "Blank":
+                        {
+                            int n = int.TryParse(el.Attribute("Num")?.Value, out var b) ? b : 1;
+                            sb.Append(new string(' ', n));
+                            break;
+                        }
+                    case "NewLine":
+                        {
+                            int n = int.TryParse(el.Attribute("Num")?.Value, out var nl) ? nl : 1;
+                            for (int i = 0; i < n; i++) sb.Append("\r\n");
+                            break;
+                        }
+                    case "Access":
+                        sb.Append(ReconstructAccess(el));
+                        break;
+                    case "Comment":
+                    case "LineComment":
+                        {
+                            var text = el.Descendants().FirstOrDefault(d => d.Name.LocalName == "Text")?.Value ?? el.Value;
+                            sb.Append(el.Name.LocalName == "LineComment" ? "//" + text : "(*" + text + "*)");
+                            break;
+                        }
+                    default:
+                        // Unknown container element: descend so nested tokens are not lost.
+                        AppendStTokens(el, sb);
+                        break;
+                }
+            }
+        }
+
+        private string ReconstructAccess(XElement access)
+        {
+            // Literal / typed constant
+            var constant = access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Constant");
+            if (constant != null)
+            {
+                var val = constant.Descendants().FirstOrDefault(e => e.Name.LocalName == "ConstantValue")?.Value;
+                if (!string.IsNullOrEmpty(val)) return val;
+            }
+
+            // Symbolic operand: join component names with '.'
+            var symbol = access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Symbol");
+            if (symbol != null)
+            {
+                var parts = symbol.Elements()
+                    .Where(e => e.Name.LocalName == "Component")
+                    .Select(c => c.Attribute("Name")?.Value ?? "")
+                    .Where(s => s.Length > 0)
+                    .ToList();
+                if (parts.Count > 0) return string.Join(".", parts);
+            }
+
+            return string.Empty;
+        }
+
+        private string SummarizeFlgNet(XElement flgNet)
+        {
+            var instructions = new List<string>();
+            foreach (var part in flgNet.Descendants().Where(e => e.Name.LocalName == "Part"))
+            {
+                var n = part.Attribute("Name")?.Value;
+                if (!string.IsNullOrEmpty(n)) instructions.Add(n);
+            }
+            foreach (var call in flgNet.Descendants().Where(e => e.Name.LocalName == "Call"))
+            {
+                var ci = call.Descendants().FirstOrDefault(e => e.Name.LocalName == "CallInfo");
+                if (ci != null)
+                {
+                    instructions.Add($"CALL {ci.Attribute("BlockType")?.Value} \"{ci.Attribute("Name")?.Value}\"");
+                }
+            }
+
+            var operands = flgNet.Descendants()
+                .Where(e => e.Name.LocalName == "Access")
+                .Select(ReconstructAccess)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct()
+                .ToList();
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"//   Instructions: {(instructions.Count > 0 ? string.Join(", ", instructions) : "(none)")}");
+            sb.AppendLine($"//   Operands: {(operands.Count > 0 ? string.Join(", ", operands) : "(none)")}");
+            return sb.ToString();
+        }
+
+        private string GetMultilingualText(XElement compileUnit, string compositionName)
+        {
+            // Network Title/Comment live directly under the CompileUnit's ObjectList,
+            // not inside the NetworkSource (which may hold per-element comments).
+            var objectList = compileUnit.Elements().FirstOrDefault(e => e.Name.LocalName == "ObjectList");
+            var scope = objectList ?? compileUnit;
+
+            var mlt = scope.Elements().FirstOrDefault(e =>
+                e.Name.LocalName == "MultilingualText" &&
+                (string)e.Attribute("CompositionName") == compositionName);
+            if (mlt == null) return string.Empty;
+
+            var text = mlt.Descendants().FirstOrDefault(e => e.Name.LocalName == "Text");
+            return text?.Value?.Trim() ?? string.Empty;
+        }
+
+        #endregion
 
         public List<PlcBlock> GetBlocks(string softwarePath, string regexName = "")
         {

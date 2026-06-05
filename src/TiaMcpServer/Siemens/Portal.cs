@@ -1401,7 +1401,25 @@ namespace TiaMcpServer.Siemens
             var compileUnits = doc.Descendants().Where(e => e.Name.LocalName == "SW.Blocks.CompileUnit").ToList();
             if (compileUnits.Count == 0)
             {
-                return "(No code networks in this block - it is likely a data block (DB) or interface-only block.)";
+                // No networks: this is a data block (DB) or interface-only block.
+                // Reconstruct its interface (data structure) instead.
+                var iface = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "Interface");
+                if (iface != null)
+                {
+                    var dbSb = new StringBuilder();
+                    dbSb.AppendLine("// Data block interface (no executable code)");
+                    var any = false;
+                    foreach (var section in iface.Descendants().Where(e => e.Name.LocalName == "Section"))
+                    {
+                        if (!section.Elements().Any(e => e.Name.LocalName == "Member")) continue;
+                        var sectionName = section.Attribute("Name")?.Value ?? "Section";
+                        dbSb.AppendLine($"{sectionName}:");
+                        ReconstructTypeMembers(section, dbSb, 1);
+                        any = true;
+                    }
+                    if (any) return dbSb.ToString();
+                }
+                return "(No code networks or interface members found in this block.)";
             }
 
             var sb = new StringBuilder();
@@ -4561,7 +4579,66 @@ namespace TiaMcpServer.Siemens
 
         public List<(string SourceObject, string ReferencedObject, string ReferenceType, string Path)> GetCrossReferences(string softwarePath, string objectPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Getting cross-references: {objectPath}");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            // Resolve the target object (block first, then type).
+            IEngineeringServiceProvider provider = GetBlock(softwarePath, objectPath) as IEngineeringServiceProvider
+                                                   ?? GetType(softwarePath, objectPath) as IEngineeringServiceProvider;
+            if (provider == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"Block or type not found at '{objectPath}'");
+            }
+
+            var results = new List<(string, string, string, string)>();
+            try
+            {
+                var service = provider.GetService<CrossReferenceService>();
+                if (service == null)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "Cross-reference service is not available for this object");
+                }
+
+                var crResult = service.GetCrossReferences(CrossReferenceFilter.AllObjects);
+                if (crResult?.Sources != null)
+                {
+                    foreach (var src in crResult.Sources)
+                    {
+                        var srcName = src.Name ?? "";
+                        foreach (var reference in src.References)
+                        {
+                            var refName = reference.Name ?? "";
+                            var refPath = reference.Path ?? "";
+                            var locations = reference.Locations;
+                            if (locations != null && locations.Any())
+                            {
+                                foreach (var loc in locations)
+                                {
+                                    results.Add((srcName, refName, loc.ReferenceType.ToString(), refPath));
+                                }
+                            }
+                            else
+                            {
+                                results.Add((srcName, refName, "", refPath));
+                            }
+                        }
+                    }
+                }
+            }
+            catch (PortalException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, $"Failed to read cross-references for '{objectPath}': {ex.Message}", null, ex);
+            }
+
+            return results;
         }
 
         #endregion

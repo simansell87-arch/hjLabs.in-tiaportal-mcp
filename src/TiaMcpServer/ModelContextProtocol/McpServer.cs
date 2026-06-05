@@ -1253,6 +1253,88 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "GetBlockXml"), Description("Get the raw SimaticML (Openness) XML of a block, for read-modify-write round-tripping (e.g. editing LAD). The block must be consistent (compiled).")]
+        public static ResponseBlockCode GetBlockXml(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("blockPath: full path to the block, e.g. 'Group/Subgroup/Name'")] string blockPath)
+        {
+            try
+            {
+                var xml = Portal.GetBlockXml(softwarePath, blockPath);
+                return new ResponseBlockCode
+                {
+                    Message = $"Block XML retrieved from '{blockPath}' in '{softwarePath}'",
+                    ProgrammingLanguage = "SimaticML",
+                    Code = xml,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["length"] = xml?.Length ?? 0 }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"Failed to get block XML from '{blockPath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error getting block XML from '{blockPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "WriteBlockScl"), Description("Create or REPLACE a PLC block from SCL source text (imports it as an external source, generates the block, removes the temp source, optionally compiles). MUTATES the project. Refuses to overwrite an existing block unless overwrite=true.")]
+        public static ResponseWriteBlock WriteBlockScl(
+            [Description("softwarePath: path to the plc software")] string softwarePath,
+            [Description("sclSource: full SCL source including the FUNCTION/FUNCTION_BLOCK/ORGANIZATION_BLOCK/DATA_BLOCK declaration and END_*")] string sclSource,
+            [Description("compile: compile the software after generating (default true)")] bool compile = true,
+            [Description("overwrite: allow replacing an existing block of the same name (default false)")] bool overwrite = false)
+        {
+            try
+            {
+                var (blocks, compiled, summary) = Portal.WriteBlockScl(softwarePath, sclSource, compile, overwrite);
+                return new ResponseWriteBlock
+                {
+                    Message = $"SCL written to '{softwarePath}'",
+                    AffectedBlocks = blocks,
+                    Compiled = compiled,
+                    CompileSummary = summary,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = blocks.Count }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"WriteBlockScl failed: {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error in WriteBlockScl: {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "WriteBlockXml"), Description("Create or REPLACE a block from SimaticML (Openness) XML text - the read-modify-write path for any language including LAD (pair with GetBlockXml). MUTATES the project. Refuses to overwrite an existing block unless overwrite=true.")]
+        public static ResponseWriteBlock WriteBlockXml(
+            [Description("softwarePath: path to the plc software")] string softwarePath,
+            [Description("blockXml: the full SimaticML block XML (as from GetBlockXml/ExportBlock)")] string blockXml,
+            [Description("groupPath: target block group (default root)")] string groupPath = "",
+            [Description("overwrite: allow replacing an existing block of the same name (default false)")] bool overwrite = false)
+        {
+            try
+            {
+                var blocks = Portal.WriteBlockXml(softwarePath, groupPath, blockXml, overwrite);
+                return new ResponseWriteBlock
+                {
+                    Message = $"Block XML imported into '{softwarePath}'",
+                    AffectedBlocks = blocks,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = blocks.Count }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"WriteBlockXml failed: {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error in WriteBlockXml: {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         [McpServerTool(Name = "GetBlocks"), Description("Get a list of blocks, which are located in plc software")]
         public static ResponseBlocks GetBlocks(
             [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,

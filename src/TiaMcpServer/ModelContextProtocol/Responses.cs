@@ -554,6 +554,13 @@ namespace TiaMcpServer.ModelContextProtocol
         public string? Code { get; set; }
     }
 
+    public class ResponseWriteBlock : ResponseMessage
+    {
+        public IEnumerable<string>? AffectedBlocks { get; set; }
+        public bool? Compiled { get; set; }
+        public string? CompileSummary { get; set; }
+    }
+
     public class ResponseScreenInfo : ResponseAttributes
     {
         public string? Name { get; set; }

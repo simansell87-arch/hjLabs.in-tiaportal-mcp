@@ -1735,6 +1735,192 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        /// <summary>
+        /// Returns the raw SimaticML (Openness) XML of a block, for read-modify-write round-tripping.
+        /// </summary>
+        public string GetBlockXml(string softwarePath, string blockPath)
+        {
+            _logger?.LogInformation($"Getting block XML: {blockPath}");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var block = GetBlock(softwarePath, blockPath);
+            if (block == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"Block not found at '{blockPath}'");
+            }
+            if (!block.IsConsistent)
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "Block is inconsistent (not compiled); compile it before exporting its XML.");
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_blockxml_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                var file = Path.Combine(tempDir, "block.xml");
+                block.Export(new FileInfo(file), ExportOptions.None);
+                return File.ReadAllText(file);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Creates or replaces a block from SCL source text: imports the source, generates the
+        /// block, removes the transient external source, and optionally compiles. MUTATES the project.
+        /// </summary>
+        public (List<string> AffectedBlocks, bool Compiled, string CompileSummary) WriteBlockScl(string softwarePath, string sclSource, bool compile, bool overwrite)
+        {
+            _logger?.LogInformation("Writing block(s) from SCL source...");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+            if (string.IsNullOrWhiteSpace(sclSource))
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams, "SCL source is empty");
+            }
+
+            var before = new HashSet<string>(GetBlocks(softwarePath).Select(b => b.Name), StringComparer.OrdinalIgnoreCase);
+
+            // Determine declared block names from the SCL and refuse to clobber existing ones unless allowed.
+            var declared = Regex.Matches(sclSource, "(?im)\\b(?:FUNCTION_BLOCK|FUNCTION|ORGANIZATION_BLOCK|DATA_BLOCK)\\s+\"?([A-Za-z0-9_]+)\"?")
+                .Cast<Match>().Select(m => m.Groups[1].Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (!overwrite)
+            {
+                var clash = declared.Where(n => before.Contains(n)).ToList();
+                if (clash.Any())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Block(s) already exist: {string.Join(", ", clash)}. Pass overwrite=true to replace.");
+                }
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_writescl_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            const string srcName = "mcp_write.scl";
+            var srcFile = Path.Combine(tempDir, srcName);
+            try
+            {
+                File.WriteAllText(srcFile, sclSource);
+
+                if (!ImportExternalSource(softwarePath, "", srcFile))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Failed to import the SCL as an external source (check the SCL syntax/headers).");
+                }
+
+                bool generated;
+                try
+                {
+                    generated = GenerateBlocksFromSource(softwarePath, srcName);
+                }
+                finally
+                {
+                    try { DeleteExternalSource(softwarePath, srcName); } catch { }
+                }
+
+                if (!generated)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Failed to generate blocks from the SCL source (syntax error or unsupported construct).");
+                }
+
+                var after = GetBlocks(softwarePath);
+                var affected = after.Where(b => !before.Contains(b.Name)).Select(b => b.Name).ToList();
+                foreach (var d in declared)
+                {
+                    if (!affected.Contains(d, StringComparer.OrdinalIgnoreCase) &&
+                        after.Any(b => b.Name.Equals(d, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        affected.Add(d);
+                    }
+                }
+
+                bool compiled = false;
+                string summary = "(not compiled)";
+                if (compile)
+                {
+                    var result = CompileSoftware(softwarePath);
+                    if (result != null)
+                    {
+                        var msgs = new List<string>();
+                        CollectCompileMessages(result.Messages, msgs);
+                        int errs = msgs.Count(m => m.Contains("[Error]"));
+                        int warns = msgs.Count(m => m.Contains("[Warning]"));
+                        compiled = result.State.ToString() != "Error";
+                        summary = $"{(compiled ? "SUCCESS" : "FAILED")}: {errs} error(s), {warns} warning(s)";
+                    }
+                }
+
+                return (affected, compiled, summary);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Creates or replaces a block from SimaticML (Openness) XML text - the read-modify-write
+        /// path for any language including LAD. MUTATES the project.
+        /// </summary>
+        public List<string> WriteBlockXml(string softwarePath, string groupPath, string blockXml, bool overwrite)
+        {
+            _logger?.LogInformation("Writing block from SimaticML XML...");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+            if (string.IsNullOrWhiteSpace(blockXml))
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams, "Block XML is empty");
+            }
+
+            string blockName;
+            try
+            {
+                var doc = XDocument.Parse(blockXml);
+                var blockEl = doc.Descendants().FirstOrDefault(e => e.Name.LocalName.StartsWith("SW.Blocks."));
+                blockName = blockEl?.Elements().FirstOrDefault(e => e.Name.LocalName == "AttributeList")?
+                    .Elements().FirstOrDefault(e => e.Name.LocalName == "Name")?.Value;
+            }
+            catch (Exception ex)
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams, $"Block XML is not valid: {ex.Message}", null, ex);
+            }
+
+            if (!overwrite && !string.IsNullOrEmpty(blockName))
+            {
+                if (GetBlocks(softwarePath).Any(b => b.Name.Equals(blockName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Block '{blockName}' already exists. Pass overwrite=true to replace.");
+                }
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_writexml_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            var file = Path.Combine(tempDir, SanitizeFileName(blockName ?? "block") + ".xml");
+            try
+            {
+                File.WriteAllText(file, blockXml, new UTF8Encoding(true));
+                if (!ImportBlock(softwarePath, groupPath ?? string.Empty, file))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import of the block XML failed (check the SimaticML is valid and the target group exists).");
+                }
+                return new List<string> { blockName ?? "(imported)" };
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
         #endregion
 
         public List<PlcBlock> GetBlocks(string softwarePath, string regexName = "")

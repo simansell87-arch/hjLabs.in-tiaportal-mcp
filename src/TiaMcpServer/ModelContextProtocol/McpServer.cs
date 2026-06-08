@@ -1335,6 +1335,88 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "GetTypeXml"), Description("Get the raw SimaticML (Openness) XML of a PLC data type (UDT), for read-modify-write round-tripping. The type must be consistent (compiled).")]
+        public static ResponseBlockCode GetTypeXml(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("typePath: full path to the UDT, e.g. 'Group/Subgroup/Name'")] string typePath)
+        {
+            try
+            {
+                var xml = Portal.GetTypeXml(softwarePath, typePath);
+                return new ResponseBlockCode
+                {
+                    Message = $"Type XML retrieved from '{typePath}' in '{softwarePath}'",
+                    ProgrammingLanguage = "SimaticML",
+                    Code = xml,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["length"] = xml?.Length ?? 0 }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"Failed to get type XML from '{typePath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error getting type XML from '{typePath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "WriteTypeXml"), Description("Create or REPLACE a PLC data type (UDT) from SimaticML (Openness) XML text - the read-modify-write path (pair with GetTypeXml). MUTATES the project. Refuses to overwrite an existing type unless overwrite=true.")]
+        public static ResponseWriteBlock WriteTypeXml(
+            [Description("softwarePath: path to the plc software")] string softwarePath,
+            [Description("typeXml: the full SimaticML type XML (as from GetTypeXml/ExportType)")] string typeXml,
+            [Description("groupPath: target type group (default root)")] string groupPath = "",
+            [Description("overwrite: allow replacing an existing type of the same name (default false)")] bool overwrite = false)
+        {
+            try
+            {
+                var types = Portal.WriteTypeXml(softwarePath, groupPath, typeXml, overwrite);
+                return new ResponseWriteBlock
+                {
+                    Message = $"Type XML imported into '{softwarePath}'",
+                    AffectedBlocks = types,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = types.Count }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"WriteTypeXml failed: {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error in WriteTypeXml: {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "WriteTypeScl"), Description("Create or REPLACE PLC data type(s) (UDT) from SCL 'TYPE \"Name\" ... END_TYPE' source text. MUTATES the project. Refuses to overwrite an existing type unless overwrite=true.")]
+        public static ResponseWriteBlock WriteTypeScl(
+            [Description("softwarePath: path to the plc software")] string softwarePath,
+            [Description("sclSource: SCL UDT source, e.g. 'TYPE \"typeX\" VERSION : 0.1 STRUCT a : Bool; END_STRUCT; END_TYPE'")] string sclSource,
+            [Description("compile: compile the software after generating (default true)")] bool compile = true,
+            [Description("overwrite: allow replacing an existing type of the same name (default false)")] bool overwrite = false)
+        {
+            try
+            {
+                var (types, compiled, summary) = Portal.WriteTypeScl(softwarePath, sclSource, compile, overwrite);
+                return new ResponseWriteBlock
+                {
+                    Message = $"UDT source written to '{softwarePath}'",
+                    AffectedBlocks = types,
+                    Compiled = compiled,
+                    CompileSummary = summary,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = types.Count }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException($"WriteTypeScl failed: {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error in WriteTypeScl: {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         [McpServerTool(Name = "GetBlocks"), Description("Get a list of blocks, which are located in plc software")]
         public static ResponseBlocks GetBlocks(
             [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,

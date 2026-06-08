@@ -1921,6 +1921,190 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        /// <summary>
+        /// Returns the raw SimaticML (Openness) XML of a PLC data type (UDT), for round-tripping.
+        /// </summary>
+        public string GetTypeXml(string softwarePath, string typePath)
+        {
+            _logger?.LogInformation($"Getting type XML: {typePath}");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var type = GetType(softwarePath, typePath);
+            if (type == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"Type not found at '{typePath}'");
+            }
+            if (!type.IsConsistent)
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "Type is inconsistent (not compiled); compile it before exporting its XML.");
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_typexml_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                var file = Path.Combine(tempDir, "type.xml");
+                type.Export(new FileInfo(file), ExportOptions.None);
+                return File.ReadAllText(file);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Creates or replaces a PLC data type (UDT) from SimaticML XML text. MUTATES the project.
+        /// </summary>
+        public List<string> WriteTypeXml(string softwarePath, string groupPath, string typeXml, bool overwrite)
+        {
+            _logger?.LogInformation("Writing UDT from SimaticML XML...");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+            if (string.IsNullOrWhiteSpace(typeXml))
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams, "Type XML is empty");
+            }
+
+            string typeName;
+            try
+            {
+                var doc = XDocument.Parse(typeXml);
+                var typeEl = doc.Descendants().FirstOrDefault(e => e.Name.LocalName.StartsWith("SW.Types."));
+                typeName = typeEl?.Elements().FirstOrDefault(e => e.Name.LocalName == "AttributeList")?
+                    .Elements().FirstOrDefault(e => e.Name.LocalName == "Name")?.Value;
+            }
+            catch (Exception ex)
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams, $"Type XML is not valid: {ex.Message}", null, ex);
+            }
+
+            if (!overwrite && !string.IsNullOrEmpty(typeName))
+            {
+                if (GetTypes(softwarePath).Any(t => t.Name.Equals(typeName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Type '{typeName}' already exists. Pass overwrite=true to replace.");
+                }
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_writetypexml_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            var file = Path.Combine(tempDir, SanitizeFileName(typeName ?? "type") + ".xml");
+            try
+            {
+                File.WriteAllText(file, typeXml, new UTF8Encoding(true));
+                if (!ImportType(softwarePath, groupPath ?? string.Empty, file))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import of the type XML failed (check the SimaticML is valid and the target group exists).");
+                }
+                return new List<string> { typeName ?? "(imported)" };
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Creates or replaces PLC data type(s) (UDT) from SCL "TYPE ... END_TYPE" source text,
+        /// via an external source. MUTATES the project.
+        /// </summary>
+        public (List<string> AffectedTypes, bool Compiled, string CompileSummary) WriteTypeScl(string softwarePath, string sclSource, bool compile, bool overwrite)
+        {
+            _logger?.LogInformation("Writing UDT(s) from SCL TYPE source...");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+            if (string.IsNullOrWhiteSpace(sclSource))
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams, "SCL/UDT source is empty");
+            }
+
+            var before = new HashSet<string>(GetTypes(softwarePath).Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
+
+            var declared = Regex.Matches(sclSource, "(?im)\\bTYPE\\s+\"?([A-Za-z0-9_]+)\"?")
+                .Cast<Match>().Select(m => m.Groups[1].Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (!overwrite)
+            {
+                var clash = declared.Where(n => before.Contains(n)).ToList();
+                if (clash.Any())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Type(s) already exist: {string.Join(", ", clash)}. Pass overwrite=true to replace.");
+                }
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_writetypescl_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            const string srcName = "mcp_type.udt";
+            var srcFile = Path.Combine(tempDir, srcName);
+            try
+            {
+                File.WriteAllText(srcFile, sclSource);
+
+                if (!ImportExternalSource(softwarePath, "", srcFile))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Failed to import the UDT source (check the TYPE/END_TYPE syntax).");
+                }
+
+                bool generated;
+                try
+                {
+                    generated = GenerateBlocksFromSource(softwarePath, srcName);
+                }
+                finally
+                {
+                    try { DeleteExternalSource(softwarePath, srcName); } catch { }
+                }
+
+                if (!generated)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Failed to generate the UDT from source.");
+                }
+
+                var after = GetTypes(softwarePath);
+                var affected = after.Where(t => !before.Contains(t.Name)).Select(t => t.Name).ToList();
+                foreach (var d in declared)
+                {
+                    if (!affected.Contains(d, StringComparer.OrdinalIgnoreCase) &&
+                        after.Any(t => t.Name.Equals(d, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        affected.Add(d);
+                    }
+                }
+
+                bool compiled = false;
+                string summary = "(not compiled)";
+                if (compile)
+                {
+                    var result = CompileSoftware(softwarePath);
+                    if (result != null)
+                    {
+                        var msgs = new List<string>();
+                        CollectCompileMessages(result.Messages, msgs);
+                        int errs = msgs.Count(m => m.Contains("[Error]"));
+                        int warns = msgs.Count(m => m.Contains("[Warning]"));
+                        compiled = result.State.ToString() != "Error";
+                        summary = $"{(compiled ? "SUCCESS" : "FAILED")}: {errs} error(s), {warns} warning(s)";
+                    }
+                }
+
+                return (affected, compiled, summary);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
         #endregion
 
         public List<PlcBlock> GetBlocks(string softwarePath, string regexName = "")

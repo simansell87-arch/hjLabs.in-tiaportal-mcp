@@ -3391,7 +3391,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.ImportTagTable(softwarePath, importPath))
+                if (Portal.RunWithTimeout(() => Portal.ImportTagTable(softwarePath, importPath), 60, "ImportTagTable"))
                 {
                     return new ResponseImportTagTable
                     {
@@ -3436,7 +3436,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var tag = Portal.CreateTag(softwarePath, tagTableName, tagName, dataType, logicalAddress, comment);
+                var tag = Portal.RunWithTimeout(() => Portal.CreateTag(softwarePath, tagTableName, tagName, dataType, logicalAddress, comment), 30, "CreateTag");
                 if (tag != null)
                 {
                     return new ResponseCreateTag
@@ -3494,7 +3494,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.DeleteTag(softwarePath, tagTableName, tagName))
+                if (Portal.RunWithTimeout(() => Portal.DeleteTag(softwarePath, tagTableName, tagName), 30, "DeleteTag"))
                 {
                     return new ResponseDeleteTag
                     {

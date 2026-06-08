@@ -1347,6 +1347,30 @@ namespace TiaMcpServer.Siemens
             return string.Join("\\", segments);
         }
 
+        /// <summary>
+        /// Runs a potentially-blocking Openness operation on a worker thread with a timeout.
+        /// If TIA Portal raises a modal dialog Openness cannot dismiss (an address/overwrite
+        /// confirmation, or the object being open in an editor), the underlying call blocks
+        /// indefinitely; this returns a fast, clear error instead of hanging the client.
+        /// </summary>
+        public static T RunWithTimeout<T>(Func<T> action, int timeoutSeconds, string operation)
+        {
+            var task = System.Threading.Tasks.Task.Run(action);
+            if (!task.Wait(TimeSpan.FromSeconds(timeoutSeconds)))
+            {
+                throw new PortalException(PortalErrorCode.InvalidState,
+                    $"'{operation}' did not complete within {timeoutSeconds}s. TIA Portal is most likely waiting on a modal dialog that Openness cannot dismiss (e.g. an address/overwrite confirmation, or the object is open in an editor). Check TIA Portal, dismiss any dialog and/or close the relevant editor, then retry.");
+            }
+            try
+            {
+                return task.Result;
+            }
+            catch (System.AggregateException ae)
+            {
+                throw ae.InnerException ?? ae;
+            }
+        }
+
         public (string Language, string Code) GetBlockCode(string softwarePath, string blockPath)
         {
             _logger?.LogInformation($"Getting block code: {blockPath}");

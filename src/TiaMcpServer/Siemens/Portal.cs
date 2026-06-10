@@ -3055,23 +3055,22 @@ namespace TiaMcpServer.Siemens
         }
 
         // TIA portal crashes when exporting blocks as documents, :-(
-        public IEnumerable<PlcBlock>? ExportBlocksAsDocuments(string softwarePath, string exportPath, string regexName = "", bool preservePath = false)
+        public (List<PlcBlock> Exported, List<string> Failures) ExportBlocksAsDocuments(string softwarePath, string exportPath, string regexName = "", bool preservePath = false)
         {
             _logger?.LogInformation("Exporting blocks as documents...");
 
+            var exportList = new List<PlcBlock>();
+            var failures = new List<string>();
+
             if (IsProjectNull())
             {
-                return null;
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
             }
 
             if (Engineering.TiaMajorVersion < 20)
             {
-                _logger?.LogWarning("ExportBlocksAsDocuments is only supported on TIA Portal V20 or newer");
-                return null;
+                throw new PortalException(PortalErrorCode.InvalidState, "ExportBlocksAsDocuments is only supported on TIA Portal V20 or newer");
             }
-
-            var exportList = new List<PlcBlock>();
-            var failures = new List<string>();
 
             PlcBlock[] list;
             try
@@ -3081,7 +3080,7 @@ namespace TiaMcpServer.Siemens
             catch (Exception ex)
             {
                 _logger?.LogError(ex, $"Failed to retrieve block list for {softwarePath}");
-                return exportList;
+                return (exportList, failures);
             }
 
             for (int i = 0; i < list.Count(); i++)
@@ -3093,6 +3092,7 @@ namespace TiaMcpServer.Siemens
                 // Skip inconsistent blocks (TIA generally won’t export them)
                 if (!block.IsConsistent)
                 {
+                    failures.Add($"{block.Name}: skipped - inconsistent (compile first)");
                     _logger?.LogWarning($"Skipping inconsistent block {block.Name}");
                     continue;
                 }
@@ -3152,7 +3152,7 @@ namespace TiaMcpServer.Siemens
                     }
                     catch (EngineeringNotSupportedException ex)
                     {
-                        failures.Add($"{block.Name}: not supported ({ex.Message})");
+                        failures.Add($"{block.Name}: document (.s7dcl) export not supported for this block - typically optimized/SCL or system blocks; use the XML ExportBlocks instead ({ex.Message})");
                         _logger?.LogWarning(ex, $"EngineeringNotSupported exporting {block.Name}");
                         continue;
                     }
@@ -3194,15 +3194,13 @@ namespace TiaMcpServer.Siemens
             if (failures.Count > 0)
             {
                 _logger?.LogWarning($"ExportBlocksAsDocuments completed with {failures.Count} failures out of {list.Count()}. First failure: {failures[0]}");
-                // Optional verbose list:
-                // _logger?.LogDebug("All failures: {Failures}", string.Join("; ", failures));
             }
             else
             {
                 _logger?.LogInformation($"ExportBlocksAsDocuments completed successfully. Exported {exportList.Count} blocks.");
             }
 
-            return exportList;
+            return (exportList, failures);
         }
 
         public bool ImportFromDocuments(string softwarePath, string groupPath, string importPath, string fileNameWithoutExtension, ImportDocumentOptions option)

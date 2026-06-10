@@ -2873,8 +2873,8 @@ namespace TiaMcpServer.ModelContextProtocol
                 }
 
                 // Export blocks as documents asynchronously
-                var exportedBlocks = await Task.Run(() => Portal.ExportBlocksAsDocuments(softwarePath, exportPath, regexName, preservePath));
-                
+                var (exportedBlocks, failures) = await Task.Run(() => Portal.ExportBlocksAsDocuments(softwarePath, exportPath, regexName, preservePath));
+
                 // Send progress update after export completion
                 if (exportedBlocks != null && progressToken != null)
                 {
@@ -2932,16 +2932,34 @@ namespace TiaMcpServer.ModelContextProtocol
                     var duration = (DateTime.Now - startTime).TotalSeconds;
                     Logger?.LogInformation($"Document export completed: {processedCount} blocks exported in {duration:F2} seconds");
 
+                    var message = $"Document export completed: {processedCount} blocks with regex '{regexName}' exported from '{softwarePath}' to '{exportPath}'";
+                    if (failures.Count > 0)
+                    {
+                        message += $". {failures.Count} block(s) NOT exported: {string.Join("; ", failures.Take(20))}";
+                        if (failures.Count > 20)
+                        {
+                            message += $" (+{failures.Count - 20} more)";
+                        }
+                    }
+
+                    var failuresJson = new JsonArray();
+                    foreach (var f in failures)
+                    {
+                        failuresJson.Add(f);
+                    }
+
                     return new ResponseExportBlocksAsDocuments
                     {
-                        Message = $"Document export completed: {processedCount} blocks with regex '{regexName}' exported from '{softwarePath}' to '{exportPath}'",
+                        Message = message,
                         Items = responseList,
                         Meta = new JsonObject
                         {
                             ["timestamp"] = DateTime.Now,
-                            ["success"] = true,
+                            ["success"] = failures.Count == 0,
                             ["totalBlocks"] = totalBlocks,
                             ["exportedBlocks"] = processedCount,
+                            ["failedBlocks"] = failures.Count,
+                            ["failures"] = failuresJson,
                             ["duration"] = duration
                         }
                     };

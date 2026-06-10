@@ -5615,8 +5615,34 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetTechnologyObjects(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetTechnologyObjects(softwarePath, regexName);
+                var items = new List<ResponseTechnologyObject>();
+                foreach (var obj in list)
+                {
+                    if (obj is global::Siemens.Engineering.IEngineeringObject eo)
+                    {
+                        string name = "";
+                        string? typeId = null;
+                        try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                        try { typeId = eo.GetAttribute("OfSystemLibElement")?.ToString(); } catch { }
+                        items.Add(new ResponseTechnologyObject
+                        {
+                            Name = name,
+                            TypeIdentifier = typeId,
+                            Attributes = Helper.GetAttributeList(eo)
+                        });
+                    }
+                }
+                return new ResponseTechnologyObjects
+                {
+                    Message = $"Technology objects retrieved from '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
             }
             catch (Exception ex) when (ex is not McpException)
             {
@@ -5631,8 +5657,32 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetTechnologyObject(softwarePath, objectName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var obj = Portal.GetTechnologyObject(softwarePath, objectName);
+                var eo = obj as global::Siemens.Engineering.IEngineeringObject;
+                string name = "";
+                string? typeId = null;
+                if (eo != null)
+                {
+                    try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                    try { typeId = eo.GetAttribute("OfSystemLibElement")?.ToString(); } catch { }
+                }
+                return new ResponseTechnologyObject
+                {
+                    Name = name,
+                    TypeIdentifier = typeId,
+                    Attributes = eo != null ? Helper.GetAttributeList(eo) : null,
+                    Message = $"Technology object '{objectName}' retrieved from '{softwarePath}'",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
             }
             catch (Exception ex) when (ex is not McpException)
             {
@@ -5648,8 +5698,21 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ExportTechnologyObject(softwarePath, objectName, exportPath);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var file = Portal.ExportTechnologyObject(softwarePath, objectName, exportPath);
+                return new ResponseExportTechnologyObject
+                {
+                    Message = $"Technology object '{objectName}' exported from '{softwarePath}' to '{file}'",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
             }
             catch (Exception ex) when (ex is not McpException)
             {

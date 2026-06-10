@@ -1336,7 +1336,12 @@ namespace TiaMcpServer.Siemens
                     throw new PortalException(PortalErrorCode.InvalidState, "Project must be a local project to import GSD files");
                 }
 
-                throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+                // GSD/GSDML installation is a TIA Portal-wide operation that the
+                // Openness API does not expose (it requires a TIA restart and runs
+                // outside any project).
+                throw new PortalException(PortalErrorCode.InvalidState,
+                    "TIA Openness cannot install GSD/GSDML files. Install it in TIA Portal via " +
+                    "'Options > Manage general station description files (GSD)', restart TIA Portal, then reconnect.");
             }
             catch (Exception ex)
             {
@@ -5880,7 +5885,12 @@ namespace TiaMcpServer.Siemens
 
         public bool ExportExternalSource(string softwarePath, string sourceName, string exportPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            // PlcExternalSource has no Export/read-back in the Openness API (V20) -
+            // an external source is a write-only staging object for GenerateBlocksFromSource.
+            throw new PortalException(PortalErrorCode.InvalidState,
+                "TIA Openness does not expose external source content (PlcExternalSource has no Export). " +
+                "To get a block's source text, use GetBlockCode / ExportBlock instead; " +
+                "to re-generate sources from blocks, use GenerateBlocksFromSource's inverse via GetBlockCode.");
         }
 
         #endregion
@@ -6044,7 +6054,63 @@ namespace TiaMcpServer.Siemens
 
         public List<(string ObjectPath, string ChangeType, string Details)> CompareOfflineOnline(string softwarePath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Comparing offline/online for: {softwarePath}");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var plcSoftware = GetPlcSoftware(softwarePath);
+            if (plcSoftware == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No PLC software found at path '{softwarePath}'");
+            }
+
+            try
+            {
+                var result = plcSoftware.CompareToOnline();
+                var list = new List<(string ObjectPath, string ChangeType, string Details)>();
+                if (result?.RootElement != null)
+                {
+                    CollectCompareElements(result.RootElement, "", list);
+                }
+                return list;
+            }
+            catch (Exception ex)
+            {
+                throw new PortalException(PortalErrorCode.InvalidState,
+                    $"Offline/online compare failed: {ex.Message}. The PLC must be reachable - GoOnline first.", null, ex);
+            }
+        }
+
+        private void CollectCompareElements(global::Siemens.Engineering.Compare.CompareResultElement element, string parentPath, List<(string ObjectPath, string ChangeType, string Details)> list)
+        {
+            var name = element.LeftName;
+            if (string.IsNullOrEmpty(name))
+            {
+                name = element.RightName;
+            }
+            var path = string.IsNullOrEmpty(parentPath) ? name ?? "" : $"{parentPath}/{name}";
+
+            var state = "";
+            try { state = element.ComparisonResult.ToString(); } catch { }
+
+            // only report differences; identical sub-trees stay out of the result
+            if (!string.Equals(state, "Identical", StringComparison.OrdinalIgnoreCase))
+            {
+                var details = "";
+                try { details = element.DetailedInformation ?? ""; } catch { }
+                list.Add((path, state, details));
+            }
+
+            if (element.Elements != null)
+            {
+                foreach (global::Siemens.Engineering.Compare.CompareResultElement sub in element.Elements)
+                {
+                    CollectCompareElements(sub, path, list);
+                }
+            }
         }
 
         public List<(string Property, string Value1, string Value2)> CompareBlocks(string softwarePath, string blockPath1, string blockPath2)
@@ -6230,7 +6296,58 @@ namespace TiaMcpServer.Siemens
 
         public bool CopyToLibrary(string softwarePath, string blockPath, string libraryFolder = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Copying block '{blockPath}' to project library" + (string.IsNullOrEmpty(libraryFolder) ? "" : $" folder '{libraryFolder}'"));
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var block = GetBlock(softwarePath, blockPath);
+                if (block == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Block '{blockPath}' not found");
+                }
+                if (!block.IsConsistent)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Block '{block.Name}' is inconsistent (not compiled); compile it before copying to the library.");
+                }
+
+                var project = _project as Project;
+                var library = project?.ProjectLibrary;
+                if (library == null)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project library available");
+                }
+
+                var folder = (MasterCopyFolder)library.MasterCopyFolder;
+                if (!string.IsNullOrWhiteSpace(libraryFolder))
+                {
+                    foreach (var segment in libraryFolder.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        var sub = folder.Folders.FirstOrDefault(f => f.Name.Equals(segment, StringComparison.OrdinalIgnoreCase))
+                                  ?? folder.Folders.Create(segment);
+                        folder = sub;
+                    }
+                }
+
+                // PlcBlock does not statically declare IMasterCopySource; Openness objects
+                // are remoting proxies whose interface support is resolved at runtime.
+                var source = (IMasterCopySource)(object)block;
+                var masterCopy = RunWithTimeout(() => folder.MasterCopies.Create(source), 60, "CopyToLibrary");
+                return masterCopy != null;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to copy block '{blockPath}' to the project library", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["blockPath"] = blockPath;
+                pex.Data["libraryFolder"] = libraryFolder;
+                _logger?.LogError(pex, "CopyToLibrary failed for {BlockPath}", blockPath);
+                throw pex;
+            }
         }
 
         public bool CopyFromLibrary(string softwarePath, string masterCopyName, string targetGroupPath)
@@ -6388,7 +6505,35 @@ namespace TiaMcpServer.Siemens
 
         public (bool IsMultiuser, string? ServerName, List<string> Users) GetMultiuserInfo()
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting multiuser info...");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var isMultiuser = (_session != null) || (_project is MultiuserProject);
+
+            // V20 Openness exposes almost nothing on MultiuserProject - probe the
+            // common attributes and degrade gracefully.
+            string? serverName = null;
+            foreach (var attr in new[] { "ServerName", "ServerProjectName", "Server" })
+            {
+                try
+                {
+                    serverName = (_project as IEngineeringObject)?.GetAttribute(attr)?.ToString();
+                    if (!string.IsNullOrEmpty(serverName))
+                    {
+                        break;
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            // connected users are not exposed by the Openness API
+            return (isMultiuser, serverName, new List<string>());
         }
 
         #endregion
@@ -7248,29 +7393,149 @@ namespace TiaMcpServer.Siemens
 
         #region technology objects
 
+        private void CollectTechnologyObjects(
+            global::Siemens.Engineering.SW.TechnologicalObjects.TechnologicalInstanceDBGroup group,
+            List<object> list, string regexName)
+        {
+            if (group == null)
+            {
+                return;
+            }
+
+            if (group.TechnologicalObjects != null)
+            {
+                foreach (global::Siemens.Engineering.SW.TechnologicalObjects.TechnologicalInstanceDB to in group.TechnologicalObjects)
+                {
+                    if (!string.IsNullOrEmpty(regexName) && !SafeRegexMatch(to.Name, regexName))
+                    {
+                        continue;
+                    }
+                    list.Add(to);
+                }
+            }
+
+            if (group.Groups != null)
+            {
+                foreach (global::Siemens.Engineering.SW.TechnologicalObjects.TechnologicalInstanceDBUserGroup sub in group.Groups)
+                {
+                    CollectTechnologyObjects(sub, list, regexName);
+                }
+            }
+        }
+
         public List<object> GetTechnologyObjects(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting technology objects...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var plcSoftware = GetPlcSoftware(softwarePath);
+            if (plcSoftware == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No PLC software found at path '{softwarePath}'");
+            }
+
+            var list = new List<object>();
+            CollectTechnologyObjects(plcSoftware.TechnologicalObjectGroup, list, regexName);
+            return list;
         }
 
         public object? GetTechnologyObject(string softwarePath, string objectName)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Getting technology object '{objectName}'");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var all = GetTechnologyObjects(softwarePath);
+            var found = all
+                .OfType<global::Siemens.Engineering.SW.TechnologicalObjects.TechnologicalInstanceDB>()
+                .FirstOrDefault(t => t.Name.Equals(objectName, StringComparison.OrdinalIgnoreCase));
+
+            if (found == null)
+            {
+                var names = all.OfType<global::Siemens.Engineering.SW.TechnologicalObjects.TechnologicalInstanceDB>().Select(t => t.Name);
+                throw new PortalException(PortalErrorCode.NotFound, $"Technology object '{objectName}' not found", names);
+            }
+
+            return found;
         }
 
         public object? ExportTechnologyObject(string softwarePath, string objectName, string exportPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Exporting technology object '{objectName}' to '{exportPath}'");
+
+            try
+            {
+                var to = GetTechnologyObject(softwarePath, objectName) as global::Siemens.Engineering.SW.TechnologicalObjects.TechnologicalInstanceDB;
+
+                var file = ResolveExportFile(exportPath, to!.Name);
+                to.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                return file;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to export technology object '{objectName}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["objectName"] = objectName;
+                pex.Data["exportPath"] = exportPath;
+                _logger?.LogError(pex, "ExportTechnologyObject failed for {ObjectName}", objectName);
+                throw pex;
+            }
         }
 
         public bool ImportTechnologyObject(string softwarePath, string importPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Importing technology object from '{importPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var plcSoftware = GetPlcSoftware(softwarePath);
+                if (plcSoftware == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No PLC software found at path '{softwarePath}'");
+                }
+
+                var fileInfo = new FileInfo(importPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"Import file not found: {importPath}");
+                }
+
+                var imported = RunWithTimeout(
+                    () => plcSoftware.TechnologicalObjectGroup.TechnologicalObjects.Import(fileInfo, ImportOptions.Override),
+                    60, "ImportTechnologyObject");
+
+                return imported != null && imported.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import technology object from '{importPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["importPath"] = importPath;
+                _logger?.LogError(pex, "ImportTechnologyObject failed from {ImportPath}", importPath);
+                throw pex;
+            }
         }
 
         public bool DeleteTechnologyObject(string softwarePath, string objectName)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            // V20 Openness exposes TechnologicalInstanceDB without a Delete method.
+            // The instance DB it owns is visible under program blocks though, so the
+            // object can be removed by deleting that DB.
+            throw new PortalException(PortalErrorCode.InvalidState,
+                "TIA Openness V20 does not expose deleting technology objects (TechnologicalInstanceDB has no Delete). " +
+                "Delete the technology object in the TIA Portal UI, or try DeleteBlock on its instance DB under Program blocks > System blocks.");
         }
 
         #endregion

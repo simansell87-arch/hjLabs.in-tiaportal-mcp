@@ -967,6 +967,63 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        /// <summary>
+        /// Sets a module's I/O start address (byte), e.g. to pin an IO-Link encoder
+        /// at %ID100 instead of accepting the auto-assigned address. MUTATES the project.
+        /// </summary>
+        public (int OldStart, int NewStart, int Length, string IoType) SetModuleAddress(string deviceItemPath, string ioType, int startAddress)
+        {
+            _logger?.LogInformation($"Setting {ioType} start address of '{deviceItemPath}' to {startAddress}");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var item = GetDeviceItemByPath(deviceItemPath);
+                if (item == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Device item not found at path '{deviceItemPath}'. Use GetDeviceTree to list the exact paths.");
+                }
+
+                Address? address = null;
+                var available = new List<string>();
+                foreach (var a in item.Addresses)
+                {
+                    available.Add($"{a.IoType} (start {a.StartAddress}, length {a.Length})");
+                    if (a.IoType.ToString().Equals(ioType, StringComparison.OrdinalIgnoreCase))
+                    {
+                        address = a;
+                    }
+                }
+
+                if (address == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound,
+                        $"No '{ioType}' address on '{deviceItemPath}'.", available);
+                }
+
+                var oldStart = address.StartAddress;
+                var target = address;
+                RunWithTimeout<object?>(() => { target.SetAttribute("StartAddress", startAddress); return null; }, 30, "SetModuleAddress");
+
+                return (oldStart, target.StartAddress, target.Length, target.IoType.ToString());
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams,
+                    $"Failed to set {ioType} start address of '{deviceItemPath}' to {startAddress}: {DescribeException(ex)}. " +
+                    "The address may overlap another module or exceed the CPU's process image - check the address space.", null, ex);
+                pex.Data["deviceItemPath"] = deviceItemPath;
+                pex.Data["ioType"] = ioType;
+                pex.Data["startAddress"] = startAddress;
+                _logger?.LogError(pex, "SetModuleAddress failed for {DeviceItemPath}", deviceItemPath);
+                throw pex;
+            }
+        }
+
         // Resolves a path to the NetworkInterface feature it carries. Accepts the
         // interface device item itself, or any device/rack/head path - in that case
         // the first NetworkInterface-bearing descendant is used (the realistic input,
@@ -1891,6 +1948,54 @@ namespace TiaMcpServer.Siemens
             return string.Join("\\", segments);
         }
 
+        // Openness is not safe under concurrent access - parallel imports corrupt the
+        // attached session (observed as the project "detaching" mid-build). Mutating and
+        // heavy operations are funneled through this gate at the tool layer, so parallel
+        // MCP calls queue instead of interleaving. Tools never call other tools, so the
+        // non-reentrant semaphore cannot self-deadlock.
+        private static readonly System.Threading.SemaphoreSlim _operationGate = new System.Threading.SemaphoreSlim(1, 1);
+
+        public static T Serialized<T>(Func<T> action, string operation)
+        {
+            if (!_operationGate.Wait(TimeSpan.FromMinutes(5)))
+            {
+                throw new PortalException(PortalErrorCode.InvalidState,
+                    $"'{operation}' waited 5 minutes for another operation to finish and gave up. A previous call is most likely stuck on a TIA dialog - check TIA Portal.");
+            }
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                _operationGate.Release();
+            }
+        }
+
+        public static void Serialized(Action action, string operation)
+        {
+            Serialized<object?>(() => { action(); return null; }, operation);
+        }
+
+        /// <summary>
+        /// Joins the messages of an exception chain so the real Openness reason
+        /// (often two levels deep) survives into the tool error.
+        /// </summary>
+        public static string DescribeException(Exception ex)
+        {
+            var parts = new List<string>();
+            var current = ex;
+            while (current != null && parts.Count < 5)
+            {
+                if (!string.IsNullOrWhiteSpace(current.Message) && !parts.Contains(current.Message))
+                {
+                    parts.Add(current.Message);
+                }
+                current = current.InnerException;
+            }
+            return string.Join(" <- ", parts);
+        }
+
         /// <summary>
         /// Runs a potentially-blocking Openness operation on a worker thread with a timeout.
         /// If TIA Portal raises a modal dialog Openness cannot dismiss (an address/overwrite
@@ -2090,26 +2195,171 @@ namespace TiaMcpServer.Siemens
         private string ReconstructAccess(XElement access)
         {
             // Literal / typed constant
-            var constant = access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Constant");
+            var constant = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Constant")
+                ?? access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Constant");
             if (constant != null)
             {
                 var val = constant.Descendants().FirstOrDefault(e => e.Name.LocalName == "ConstantValue")?.Value;
                 if (!string.IsNullOrEmpty(val)) return val;
+                // constant name (named constant access)
+                var cname = constant.Attribute("Name")?.Value;
+                if (!string.IsNullOrEmpty(cname)) return cname;
             }
 
-            // Symbolic operand: join component names with '.'
-            var symbol = access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Symbol");
+            // Symbolic operand: join component names with '.', keeping array indices
+            var symbol = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Symbol")
+                ?? access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Symbol");
             if (symbol != null)
             {
                 var parts = symbol.Elements()
                     .Where(e => e.Name.LocalName == "Component")
-                    .Select(c => c.Attribute("Name")?.Value ?? "")
+                    .Select(ReconstructComponent)
                     .Where(s => s.Length > 0)
                     .ToList();
                 if (parts.Count > 0) return string.Join(".", parts);
             }
 
+            // Block / instruction call (Access Scope="Call"): faithful rendering with
+            // instance and actual parameters - these used to be dropped entirely.
+            var callInfo = access.Elements().FirstOrDefault(e => e.Name.LocalName == "CallInfo");
+            if (callInfo != null)
+            {
+                return ReconstructCallInfo(callInfo, isInstruction: false);
+            }
+
+            var instruction = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Instruction");
+            if (instruction != null)
+            {
+                return ReconstructCallInfo(instruction, isInstruction: true);
+            }
+
+            // SCL expression (e.g. an index or parenthesized term): nested token stream
+            var expression = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Expression");
+            if (expression != null)
+            {
+                var sb = new StringBuilder();
+                AppendStTokens(expression, sb);
+                return sb.ToString();
+            }
+
+            var predefined = access.Elements().FirstOrDefault(e => e.Name.LocalName == "PredefinedVariable");
+            if (predefined != null)
+            {
+                return predefined.Attribute("Name")?.Value ?? "";
+            }
+
+            var label = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Label");
+            if (label != null)
+            {
+                return label.Attribute("Name")?.Value ?? "";
+            }
+
             return string.Empty;
+        }
+
+        // A symbol component: name plus optional array indices ('Words[0]'), which are
+        // serialized as child Access elements.
+        private string ReconstructComponent(XElement component)
+        {
+            var name = component.Attribute("Name")?.Value ?? "";
+            var indices = component.Elements()
+                .Where(e => e.Name.LocalName == "Access")
+                .Select(ReconstructAccess)
+                .Where(s => s.Length > 0)
+                .ToList();
+            if (indices.Count > 0)
+            {
+                name += "[" + string.Join(", ", indices) + "]";
+            }
+            return name;
+        }
+
+        // CallInfo (user block call) / Instruction (system instruction call): render the
+        // callee (instance DB for FBs, otherwise the block/instruction name) followed by
+        // the original token stream - parentheses, parameter names, ':=' and operands all
+        // survive, so calls are no longer reconstructed as bare statement numbers.
+        private string ReconstructCallInfo(XElement callInfo, bool isInstruction)
+        {
+            var sb = new StringBuilder();
+
+            var instance = callInfo.Elements().FirstOrDefault(e => e.Name.LocalName == "Instance");
+            if (instance != null)
+            {
+                var parts = instance.Elements()
+                    .Where(e => e.Name.LocalName == "Component")
+                    .Select(ReconstructComponent)
+                    .Where(s => s.Length > 0)
+                    .ToList();
+                sb.Append(parts.Count > 0 ? string.Join(".", parts) : callInfo.Attribute("Name")?.Value ?? "");
+            }
+            else
+            {
+                sb.Append(callInfo.Attribute("Name")?.Value ?? "");
+            }
+
+            var hasParenToken = callInfo.Elements().Any(e => e.Name.LocalName == "Token" && (e.Attribute("Text")?.Value ?? "").Contains("("));
+            if (!hasParenToken)
+            {
+                sb.Append('(');
+            }
+
+            var first = true;
+            foreach (var child in callInfo.Elements())
+            {
+                switch (child.Name.LocalName)
+                {
+                    case "Instance":
+                    case "IntegerAttribute":
+                    case "DateAttribute":
+                    case "BooleanAttribute":
+                        break;
+                    case "Token":
+                        sb.Append(child.Attribute("Text")?.Value);
+                        first = false;
+                        break;
+                    case "Blank":
+                        {
+                            int n = int.TryParse(child.Attribute("Num")?.Value, out var b) ? b : 1;
+                            sb.Append(new string(' ', n));
+                            break;
+                        }
+                    case "NewLine":
+                        sb.Append("\r\n");
+                        break;
+                    case "Parameter":
+                        if (!hasParenToken && !first)
+                        {
+                            sb.Append(", ");
+                        }
+                        sb.Append(child.Attribute("Name")?.Value);
+                        if (!child.Descendants().Any(e => e.Name.LocalName == "Token" && (e.Attribute("Text")?.Value ?? "").Contains(":=")))
+                        {
+                            sb.Append(" := ");
+                        }
+                        AppendStTokens(child, sb);
+                        first = false;
+                        break;
+                    case "NamelessParameter":
+                        if (!hasParenToken && !first)
+                        {
+                            sb.Append(", ");
+                        }
+                        AppendStTokens(child, sb);
+                        first = false;
+                        break;
+                    default:
+                        AppendStTokens(child, sb);
+                        first = false;
+                        break;
+                }
+            }
+
+            if (!hasParenToken)
+            {
+                sb.Append(')');
+            }
+
+            return sb.ToString();
         }
 
         private string SummarizeFlgNet(XElement flgNet)
@@ -2950,7 +3200,7 @@ namespace TiaMcpServer.Siemens
 
                     try
                     {
-                        // Correct the argument type by using FileInfo instead of FileStream  
+                        // Correct the argument type by using FileInfo instead of FileStream
                         var fileInfo = new FileInfo(importPath);
                         if (fileInfo.Exists)
                         {
@@ -2962,9 +3212,9 @@ namespace TiaMcpServer.Siemens
                         }
 
                     }
-                    catch (Exception)
+                    catch (Exception ex)
                     {
-                        return false;
+                        throw new PortalException(PortalErrorCode.InvalidParams, $"Block import from '{importPath}' failed: {DescribeException(ex)}", null, ex);
                     }
                 }
             }
@@ -2998,7 +3248,7 @@ namespace TiaMcpServer.Siemens
 
                     try
                     {
-                        // Correct the argument type by using FileInfo instead of FileStream  
+                        // Correct the argument type by using FileInfo instead of FileStream
                         var fileInfo = new FileInfo(importPath);
                         if (fileInfo.Exists)
                         {
@@ -3009,9 +3259,9 @@ namespace TiaMcpServer.Siemens
                             }
                         }
                     }
-                    catch (Exception)
+                    catch (Exception ex)
                     {
-                        return false;
+                        throw new PortalException(PortalErrorCode.InvalidParams, $"Type import from '{importPath}' failed: {DescribeException(ex)}", null, ex);
                     }
                 }
             }
@@ -4903,6 +5153,15 @@ namespace TiaMcpServer.Siemens
                     _project = _session != null ? _session.Project : _portal.Projects.FirstOrDefault();
                 }
                 catch (Exception)
+                {
+                    TryReattach();
+                }
+
+                // A cached attach can go stale in a subtler way: the portal handle still
+                // answers (GetCurrentProcess works) but its Projects collection reads
+                // empty while the project IS open - observed after failed imports. A
+                // fresh attach to the same process sees the project again.
+                if (!IsProjectHealthy())
                 {
                     TryReattach();
                 }
@@ -7102,7 +7361,29 @@ namespace TiaMcpServer.Siemens
             }
             catch (Exception ex)
             {
-                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI tag table from '{importPath}'", null, ex);
+                var message = $"Failed to import HMI tag table from '{importPath}': {DescribeException(ex)}";
+
+                // The most common bound-tag failure: the file references a connection that
+                // is not an integrated one, so symbolic ControllerTag resolution aborts.
+                try
+                {
+                    if (ex is not PortalException && File.Exists(importPath))
+                    {
+                        var content = File.ReadAllText(importPath);
+                        if (content.Contains("<ControllerTag"))
+                        {
+                            message += " HINT: this file contains PLC-bound (symbolic) tags - they only import when the HMI has an " +
+                                       "INTEGRATED connection to the PLC (created by dragging an HMI connection in 'Devices & networks'); " +
+                                       "a manually-added connection with just an IP cannot resolve symbols, and the connection name in the " +
+                                       "XML must match the integrated connection's name.";
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                }
+
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, message, null, ex);
                 pex.Data["softwarePath"] = softwarePath;
                 pex.Data["importPath"] = importPath;
                 _logger?.LogError(pex, "ImportHmiTagTable failed for {SoftwarePath} from {ImportPath}", softwarePath, importPath);
@@ -7262,7 +7543,7 @@ namespace TiaMcpServer.Siemens
             }
             catch (Exception ex)
             {
-                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI screen from '{importPath}'", null, ex);
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI screen from '{importPath}': {DescribeException(ex)}", null, ex);
                 pex.Data["softwarePath"] = softwarePath;
                 pex.Data["importPath"] = importPath;
                 _logger?.LogError(pex, "ImportScreen failed for {SoftwarePath} from {ImportPath}", softwarePath, importPath);
@@ -7273,6 +7554,339 @@ namespace TiaMcpServer.Siemens
         public object? GetScreenInfo(string softwarePath, string screenName)
         {
             return GetScreenByName(softwarePath, screenName);
+        }
+
+        #endregion
+
+        #region HMI Screen Templates
+
+        private void CollectScreenTemplates(
+            global::Siemens.Engineering.Hmi.Screen.ScreenTemplateComposition templates,
+            global::Siemens.Engineering.Hmi.Screen.ScreenTemplateUserFolderComposition folders,
+            List<object> list,
+            string regexName)
+        {
+            if (templates != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Screen.ScreenTemplate template in templates)
+                {
+                    if (!string.IsNullOrEmpty(regexName) && !SafeRegexMatch(template.Name, regexName))
+                    {
+                        continue;
+                    }
+                    list.Add(template);
+                }
+            }
+
+            if (folders != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.Screen.ScreenTemplateUserFolder folder in folders)
+                {
+                    CollectScreenTemplates(folder.ScreenTemplates, folder.Folders, list, regexName);
+                }
+            }
+        }
+
+        public List<object> GetScreenTemplates(string softwarePath, string regexName = "")
+        {
+            _logger?.LogInformation("Getting HMI screen templates...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var list = new List<object>();
+            CollectScreenTemplates(hmi.ScreenTemplateFolder.ScreenTemplates, hmi.ScreenTemplateFolder.Folders, list, regexName);
+            return list;
+        }
+
+        public string ExportScreenTemplate(string softwarePath, string templateName, string exportPath)
+        {
+            _logger?.LogInformation($"Exporting HMI screen template '{templateName}' to '{exportPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var templates = new List<object>();
+                CollectScreenTemplates(hmi.ScreenTemplateFolder.ScreenTemplates, hmi.ScreenTemplateFolder.Folders, templates, "");
+                var template = templates
+                    .OfType<global::Siemens.Engineering.Hmi.Screen.ScreenTemplate>()
+                    .FirstOrDefault(t => t.Name.Equals(templateName, StringComparison.OrdinalIgnoreCase));
+
+                if (template == null)
+                {
+                    var names = templates.OfType<global::Siemens.Engineering.Hmi.Screen.ScreenTemplate>().Select(t => t.Name);
+                    throw new PortalException(PortalErrorCode.NotFound, $"HMI screen template '{templateName}' not found", names);
+                }
+
+                var file = ResolveExportFile(exportPath, template.Name);
+                template.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                return file;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to export HMI screen template '{templateName}': {DescribeException(ex)}", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["templateName"] = templateName;
+                pex.Data["exportPath"] = exportPath;
+                _logger?.LogError(pex, "ExportScreenTemplate failed for {TemplateName}", templateName);
+                throw pex;
+            }
+        }
+
+        public List<string> ImportScreenTemplate(string softwarePath, string importPath)
+        {
+            _logger?.LogInformation($"Importing HMI screen template from '{importPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var fileInfo = new FileInfo(importPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"Import file not found: {importPath}");
+                }
+
+                var imported = RunWithTimeout(
+                    () => hmi.ScreenTemplateFolder.ScreenTemplates.Import(fileInfo, ImportOptions.Override),
+                    120, "ImportScreenTemplate");
+
+                if (imported == null || imported.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import returned no screen templates (check the SimaticML content)");
+                }
+
+                return imported.Select(t => t.Name).ToList();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI screen template from '{importPath}': {DescribeException(ex)}", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["importPath"] = importPath;
+                _logger?.LogError(pex, "ImportScreenTemplate failed from {ImportPath}", importPath);
+                throw pex;
+            }
+        }
+
+        public string ExportHmiConnection(string softwarePath, string connectionName, string exportPath)
+        {
+            _logger?.LogInformation($"Exporting HMI connection '{connectionName}' to '{exportPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                global::Siemens.Engineering.Hmi.Communication.Connection? connection = null;
+                var available = new List<string>();
+                foreach (global::Siemens.Engineering.Hmi.Communication.Connection c in hmi.Connections)
+                {
+                    available.Add(c.Name);
+                    if (c.Name.Equals(connectionName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        connection = c;
+                    }
+                }
+
+                if (connection == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"HMI connection '{connectionName}' not found", available);
+                }
+
+                var file = ResolveExportFile(exportPath, connection.Name);
+                connection.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                return file;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to export HMI connection '{connectionName}': {DescribeException(ex)}", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["connectionName"] = connectionName;
+                pex.Data["exportPath"] = exportPath;
+                _logger?.LogError(pex, "ExportHmiConnection failed for {ConnectionName}", connectionName);
+                throw pex;
+            }
+        }
+
+        public List<string> ImportHmiConnection(string softwarePath, string importPath)
+        {
+            _logger?.LogInformation($"Importing HMI connection from '{importPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var fileInfo = new FileInfo(importPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"Import file not found: {importPath}");
+                }
+
+                var imported = RunWithTimeout(
+                    () => hmi.Connections.Import(fileInfo, ImportOptions.Override),
+                    60, "ImportHmiConnection");
+
+                if (imported == null || imported.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import returned no connections (check the SimaticML content)");
+                }
+
+                return imported.Select(c => c.Name).ToList();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI connection from '{importPath}': {DescribeException(ex)}", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["importPath"] = importPath;
+                _logger?.LogError(pex, "ImportHmiConnection failed from {ImportPath}", importPath);
+                throw pex;
+            }
+        }
+
+        #endregion
+
+        #region object model introspection
+
+        /// <summary>
+        /// Dumps the attribute infos, composition names (with counts) and service infos
+        /// of an HMI/PLC object - the discovery tool for what the installed Openness
+        /// version actually exposes (e.g. where alarms live on a Basic panel).
+        /// </summary>
+        public string DebugInspect(string softwarePath, string kind, string name = "", string parentName = "")
+        {
+            _logger?.LogInformation($"Inspecting {kind} '{name}'");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            IEngineeringObject? obj = kind.ToLowerInvariant() switch
+            {
+                "hmitarget" => GetHmiTarget(softwarePath),
+                "tagtable" => FindHmiTagTable(GetHmiTarget(softwarePath)!, name, out _),
+                "tag" => FindHmiTagTable(GetHmiTarget(softwarePath)!, parentName, out _)?.Tags
+                    .OfType<global::Siemens.Engineering.Hmi.Tag.Tag>()
+                    .FirstOrDefault(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)),
+                "screen" => GetScreenByName(softwarePath, name) as IEngineeringObject,
+                "connection" => GetHmiConnections(softwarePath)
+                    .OfType<global::Siemens.Engineering.Hmi.Communication.Connection>()
+                    .FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase)),
+                "plcsoftware" => GetPlcSoftware(softwarePath),
+                "block" => GetBlock(softwarePath, name),
+                _ => throw new PortalException(PortalErrorCode.InvalidParams,
+                    $"Unknown kind '{kind}'. Use one of: HmiTarget, TagTable, Tag, Screen, Connection, PlcSoftware, Block.")
+            };
+
+            if (obj == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"{kind} '{name}' not found at '{softwarePath}'");
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Type: {obj.GetType().FullName}");
+
+            sb.AppendLine("Attributes:");
+            try
+            {
+                foreach (var info in obj.GetAttributeInfos())
+                {
+                    string value;
+                    try { value = obj.GetAttribute(info.Name)?.ToString() ?? "<null>"; }
+                    catch (Exception ex) { value = $"<unreadable: {ex.Message}>"; }
+                    sb.AppendLine($"  {info.Name} [{info.AccessMode}] = {value}");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"  <GetAttributeInfos failed: {ex.Message}>");
+            }
+
+            sb.AppendLine("Compositions:");
+            try
+            {
+                foreach (var info in obj.GetCompositionInfos())
+                {
+                    var count = "?";
+                    try
+                    {
+                        if (obj.GetComposition(info.Name) is System.Collections.IEnumerable composition)
+                        {
+                            count = composition.Cast<object>().Count().ToString();
+                        }
+                    }
+                    catch (Exception)
+                    {
+                    }
+                    sb.AppendLine($"  {info.Name} (count: {count})");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"  <GetCompositionInfos failed: {ex.Message}>");
+            }
+
+            if (obj is IEngineeringServiceProvider provider)
+            {
+                sb.AppendLine("Services:");
+                try
+                {
+                    foreach (var info in provider.GetServiceInfos())
+                    {
+                        sb.AppendLine($"  {info.Type?.FullName ?? info.ToString()}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine($"  <GetServiceInfos failed: {ex.Message}>");
+                }
+            }
+
+            return sb.ToString();
         }
 
         #endregion
@@ -7320,14 +7934,19 @@ namespace TiaMcpServer.Siemens
 
         public void CreateHmiConnection(string softwarePath, string connectionName, string partnerDevicePath)
         {
-            // The classic (Basic/Comfort) HMI Openness API exposes Connections only for
-            // read and Import - ConnectionComposition has no Create method. Integrated
-            // connections are created in the TIA Portal Devices & networks editor, or by
-            // importing a connection XML exported from a sibling project.
+            // Verified against V20: ConnectionComposition has no Create, and the
+            // INTEGRATED connection (the one required for symbolically bound tags on
+            // optimized DBs) is not exposed to Openness at all - it does not even appear
+            // in hmi.Connections on a panel that has one. There is no project-level
+            // connection-creation API either (Siemens.Engineering.Connection.* is the
+            // online-access configuration, not project connections).
             throw new PortalException(PortalErrorCode.InvalidState,
-                "TIA Openness cannot create classic HMI connections directly (ConnectionComposition has no Create). " +
-                "Create the connection in TIA Portal under 'Devices & networks > Connections', " +
-                "or export a connection XML from a project that has one and re-import it there.");
+                "TIA Openness cannot create HMI connections. For PLC-bound (symbolic) HMI tags you need an INTEGRATED " +
+                "connection: open 'Devices & networks > Connections', select 'HMI connection' and drag a line from the " +
+                "HMI's PROFINET port to the PLC's - one manual step per panel. (A manually-added non-integrated " +
+                "connection with only an IP address can NOT resolve symbolic tags on optimized DBs.) " +
+                "ImportHmiTagTable/ImportScreen work against the integrated connection once it exists; " +
+                "ExportHmiConnection/ImportHmiConnection only round-trip non-integrated connections.");
         }
 
         #endregion
@@ -7605,7 +8224,7 @@ namespace TiaMcpServer.Siemens
             }
             catch (Exception ex)
             {
-                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI text list from '{importPath}'", null, ex);
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI text list from '{importPath}': {DescribeException(ex)}", null, ex);
                 pex.Data["softwarePath"] = softwarePath;
                 pex.Data["importPath"] = importPath;
                 _logger?.LogError(pex, "ImportTextList failed for {SoftwarePath} from {ImportPath}", softwarePath, importPath);

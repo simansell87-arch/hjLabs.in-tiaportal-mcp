@@ -205,7 +205,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.CloseProject();
+                Portal.Serialized(() => Portal.CloseProject(), "CloseProject");
 
                 // get project extension
                 string extension = Path.GetExtension(path).ToLowerInvariant();
@@ -221,7 +221,7 @@ namespace TiaMcpServer.ModelContextProtocol
 
                 if (extension.StartsWith(".ap"))
                 {
-                    success = Portal.OpenProject(path);
+                    success = Portal.Serialized(() => Portal.OpenProject(path), "OpenProject");
                 }
                 if (extension.StartsWith(".als"))
                 {
@@ -277,7 +277,7 @@ namespace TiaMcpServer.ModelContextProtocol
                 }
                 else
                 {
-                    if (Portal.SaveProject())
+                    if (Portal.Serialized(() => Portal.SaveProject(), "SaveProject"))
                     {
                         return new ResponseSaveProject
                         {
@@ -313,7 +313,7 @@ namespace TiaMcpServer.ModelContextProtocol
                 }
                 else
                 {
-                    var targetPath = Portal.SaveAsProject(newProjectPath);
+                    var targetPath = Portal.Serialized(() => Portal.SaveAsProject(newProjectPath), "SaveAsProject");
 
                     return new ResponseSaveAsProject
                     {
@@ -366,7 +366,7 @@ namespace TiaMcpServer.ModelContextProtocol
                 }
                 else
                 {
-                    success = Portal.CloseProject();
+                    success = Portal.Serialized(() => Portal.CloseProject(), "CloseProject");
                     if (success)
                     {
                         return new ResponseCloseProject
@@ -579,7 +579,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var device = Portal.CreateDevice(typeIdentifier, name, deviceName);
+                var device = Portal.Serialized(() => Portal.CreateDevice(typeIdentifier, name, deviceName), "CreateDevice");
 
                 return new ResponseCreateDevice
                 {
@@ -610,7 +610,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.DeleteDevice(devicePath);
+                Portal.Serialized(() => Portal.DeleteDevice(devicePath), "DeleteDevice");
 
                 return new ResponseDeleteDevice
                 {
@@ -641,7 +641,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var item = Portal.PlugModule(parentPath, typeIdentifier, name, positionNumber);
+                var item = Portal.Serialized(() => Portal.PlugModule(parentPath, typeIdentifier, name, positionNumber), "PlugModule");
 
                 return new ResponsePlugModule
                 {
@@ -672,7 +672,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.UnplugModule(deviceItemPath);
+                Portal.Serialized(() => Portal.UnplugModule(deviceItemPath), "UnplugModule");
 
                 return new ResponseDeleteResult
                 {
@@ -693,6 +693,41 @@ namespace TiaMcpServer.ModelContextProtocol
             catch (Exception ex) when (ex is not McpException)
             {
                 throw new McpException($"Unexpected error unplugging module at '{deviceItemPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "SetModuleAddress"), Description("Set a module's I/O start address (byte) - e.g. pin an IO-Link encoder at %ID100 instead of the auto-assigned address. MUTATES the project (does not save).")]
+        public static ResponseConnectIoDevice SetModuleAddress(
+            [Description("deviceItemPath: path to the module device item (use GetDeviceTree for exact paths)")] string deviceItemPath,
+            [Description("ioType: 'Input' or 'Output'")] string ioType,
+            [Description("startAddress: the new start BYTE address (e.g. 100 for %ID100)")] int startAddress)
+        {
+            try
+            {
+                var (oldStart, newStart, length, resolvedIoType) = Portal.Serialized(() => Portal.SetModuleAddress(deviceItemPath, ioType, startAddress), "SetModuleAddress");
+
+                return new ResponseConnectIoDevice
+                {
+                    Message = $"{resolvedIoType} start address of '{deviceItemPath}' changed {oldStart} -> {newStart} (length {length} bits). NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Addresses = new List<ResponseAddressInfo>
+                    {
+                        new ResponseAddressInfo { Module = deviceItemPath, IoType = resolvedIoType, StartAddress = newStart, Length = length }
+                    },
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error setting module address for '{deviceItemPath}': {ex.Message}", ex, McpErrorCode.InternalError);
             }
         }
 
@@ -734,7 +769,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var group = Portal.CreateDeviceGroup(groupName, parentGroupPath);
+                var group = Portal.Serialized(() => Portal.CreateDeviceGroup(groupName, parentGroupPath), "CreateDeviceGroup");
 
                 return new ResponseCreateDeviceGroup
                 {
@@ -1002,7 +1037,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.SetIpAddress(deviceItemPath, ipAddress, subnetMask, routerAddress);
+                Portal.Serialized(() => Portal.SetIpAddress(deviceItemPath, ipAddress, subnetMask, routerAddress), "SetIpAddress");
 
                 return new ResponseSetIpAddress
                 {
@@ -1031,7 +1066,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ConnectToSubnet(deviceItemPath, subnetName);
+                Portal.Serialized(() => Portal.ConnectToSubnet(deviceItemPath, subnetName), "ConnectToSubnet");
 
                 return new ResponseConnectToSubnet
                 {
@@ -1060,7 +1095,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var (name, connectedInterface, created) = Portal.CreateSubnet(deviceItemPath, subnetName);
+                var (name, connectedInterface, created) = Portal.Serialized(() => Portal.CreateSubnet(deviceItemPath, subnetName), "CreateSubnet");
 
                 return new ResponseCreateSubnet
                 {
@@ -1098,7 +1133,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var (device, controller, subnet, ioSystem, addresses) = Portal.ConnectIoDevice(deviceItemPath, controllerItemPath, subnetName, ioSystemName, deviceIp, controllerIp);
+                var (device, controller, subnet, ioSystem, addresses) = Portal.Serialized(() => Portal.ConnectIoDevice(deviceItemPath, controllerItemPath, subnetName, ioSystemName, deviceIp, controllerIp), "ConnectIoDevice");
 
                 var items = addresses.Select(a => new ResponseAddressInfo
                 {
@@ -1141,7 +1176,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ImportGsdFile(gsdFilePath);
+                Portal.Serialized(() => Portal.ImportGsdFile(gsdFilePath), "ImportGsdFile");
 
                 return new ResponseImportGsdFile
                 {
@@ -1250,7 +1285,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var result = Portal.CompileSoftware(softwarePath, password);
+                var result = Portal.Serialized(() => Portal.CompileSoftware(softwarePath, password), "CompileSoftware");
                 if (result == null)
                 {
                     throw new McpException($"Failed compiling software '{softwarePath}': result was null", McpErrorCode.InternalError);
@@ -1487,7 +1522,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var (blocks, compiled, summary) = Portal.WriteBlockScl(softwarePath, sclSource, compile, overwrite, groupPath);
+                var (blocks, compiled, summary) = Portal.Serialized(() => Portal.WriteBlockScl(softwarePath, sclSource, compile, overwrite, groupPath), "WriteBlockScl");
                 return new ResponseWriteBlock
                 {
                     Message = $"SCL written to '{softwarePath}'",
@@ -1516,7 +1551,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var blocks = Portal.WriteBlockXml(softwarePath, groupPath, blockXml, overwrite);
+                var blocks = Portal.Serialized(() => Portal.WriteBlockXml(softwarePath, groupPath, blockXml, overwrite), "WriteBlockXml");
                 return new ResponseWriteBlock
                 {
                     Message = $"Block XML imported into '{softwarePath}'",
@@ -1569,7 +1604,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var types = Portal.WriteTypeXml(softwarePath, groupPath, typeXml, overwrite);
+                var types = Portal.Serialized(() => Portal.WriteTypeXml(softwarePath, groupPath, typeXml, overwrite), "WriteTypeXml");
                 return new ResponseWriteBlock
                 {
                     Message = $"Type XML imported into '{softwarePath}'",
@@ -1596,7 +1631,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var (types, compiled, summary) = Portal.WriteTypeScl(softwarePath, sclSource, compile, overwrite);
+                var (types, compiled, summary) = Portal.Serialized(() => Portal.WriteTypeScl(softwarePath, sclSource, compile, overwrite), "WriteTypeScl");
                 return new ResponseWriteBlock
                 {
                     Message = $"UDT source written to '{softwarePath}'",
@@ -1872,7 +1907,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.ImportBlock(softwarePath, groupPath, importPath))
+                if (Portal.Serialized(() => Portal.ImportBlock(softwarePath, groupPath, importPath), "ImportBlock"))
                 {
                     return new ResponseImportBlock
                     {
@@ -2097,7 +2132,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.DeleteBlock(softwarePath, blockPath);
+                Portal.Serialized(() => Portal.DeleteBlock(softwarePath, blockPath), "DeleteBlock");
 
                 return new ResponseDeleteResult
                 {
@@ -2139,7 +2174,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var block = Portal.CopyBlock(softwarePath, sourceBlockPath, targetGroupPath, newName);
+                var block = Portal.Serialized(() => Portal.CopyBlock(softwarePath, sourceBlockPath, targetGroupPath, newName), "CopyBlock");
 
                 if (block != null)
                 {
@@ -2182,7 +2217,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.MoveBlock(softwarePath, sourceBlockPath, targetGroupPath);
+                Portal.Serialized(() => Portal.MoveBlock(softwarePath, sourceBlockPath, targetGroupPath), "MoveBlock");
 
                 return new ResponseMoveBlock
                 {
@@ -2220,7 +2255,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var group = Portal.CreateBlockGroup(softwarePath, parentGroupPath, groupName);
+                var group = Portal.Serialized(() => Portal.CreateBlockGroup(softwarePath, parentGroupPath, groupName), "CreateBlockGroup");
 
                 if (group != null)
                 {
@@ -2268,7 +2303,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.DeleteBlockGroup(softwarePath, groupPath);
+                Portal.Serialized(() => Portal.DeleteBlockGroup(softwarePath, groupPath), "DeleteBlockGroup");
 
                 return new ResponseDeleteResult
                 {
@@ -2505,7 +2540,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.ImportType(softwarePath, groupPath, importPath))
+                if (Portal.Serialized(() => Portal.ImportType(softwarePath, groupPath, importPath), "ImportType"))
                 {
                     return new ResponseImportType
                     {
@@ -2724,7 +2759,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.DeleteType(softwarePath, typePath);
+                Portal.Serialized(() => Portal.DeleteType(softwarePath, typePath), "DeleteType");
 
                 return new ResponseDeleteResult
                 {
@@ -2765,7 +2800,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var group = Portal.CreateTypeGroup(softwarePath, parentGroupPath, groupName);
+                var group = Portal.Serialized(() => Portal.CreateTypeGroup(softwarePath, parentGroupPath, groupName), "CreateTypeGroup");
 
                 if (group != null)
                 {
@@ -2813,7 +2848,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.DeleteTypeGroup(softwarePath, groupPath);
+                Portal.Serialized(() => Portal.DeleteTypeGroup(softwarePath, groupPath), "DeleteTypeGroup");
 
                 return new ResponseDeleteResult
                 {
@@ -3626,7 +3661,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.RunWithTimeout(() => Portal.ImportTagTable(softwarePath, importPath), 60, "ImportTagTable"))
+                if (Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.ImportTagTable(softwarePath, importPath), 60, "ImportTagTable"), "RunWithTimeout"))
                 {
                     return new ResponseImportTagTable
                     {
@@ -3671,7 +3706,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var tag = Portal.RunWithTimeout(() => Portal.CreateTag(softwarePath, tagTableName, tagName, dataType, logicalAddress, comment), 30, "CreateTag");
+                var tag = Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.CreateTag(softwarePath, tagTableName, tagName, dataType, logicalAddress, comment), 30, "CreateTag"), "RunWithTimeout");
                 if (tag != null)
                 {
                     return new ResponseCreateTag
@@ -3729,7 +3764,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.RunWithTimeout(() => Portal.DeleteTag(softwarePath, tagTableName, tagName), 30, "DeleteTag"))
+                if (Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.DeleteTag(softwarePath, tagTableName, tagName), 30, "DeleteTag"), "RunWithTimeout"))
                 {
                     return new ResponseDeleteTag
                     {
@@ -3780,7 +3815,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.RunWithTimeout(() => Portal.RenameTag(softwarePath, tagTableName, tagName, newName), 30, "RenameTag");
+                Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.RenameTag(softwarePath, tagTableName, tagName, newName), 30, "RenameTag"), "RunWithTimeout");
 
                 return new ResponseRename
                 {
@@ -3816,7 +3851,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var tag = Portal.RunWithTimeout(() => Portal.UpdateTag(softwarePath, tagTableName, tagName, comment, logicalAddress, dataType), 30, "UpdateTag");
+                var tag = Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.UpdateTag(softwarePath, tagTableName, tagName, comment, logicalAddress, dataType), 30, "UpdateTag"), "RunWithTimeout");
 
                 return new ResponseCreateTag
                 {
@@ -3871,7 +3906,7 @@ namespace TiaMcpServer.ModelContextProtocol
 
             try
             {
-                var results = Portal.BulkCreateTags(softwarePath, tagTableName, tags);
+                var results = Portal.Serialized(() => Portal.BulkCreateTags(softwarePath, tagTableName, tags), "BulkCreateTags");
                 var created = results.Count(r => r.Success);
                 var items = results.Select(r => new ResponseBulkTagResult
                 {
@@ -3905,7 +3940,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var oldName = Portal.RunWithTimeout(() => Portal.RenameBlockOrType(softwarePath, blockPath, newName, false), 30, "RenameBlock");
+                var oldName = Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.RenameBlockOrType(softwarePath, blockPath, newName, false), 30, "RenameBlock"), "RunWithTimeout");
 
                 return new ResponseRename
                 {
@@ -3933,7 +3968,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var oldName = Portal.RunWithTimeout(() => Portal.RenameBlockOrType(softwarePath, typePath, newName, true), 30, "RenameType");
+                var oldName = Portal.Serialized(() => Portal.RunWithTimeout(() => Portal.RenameBlockOrType(softwarePath, typePath, newName, true), 30, "RenameType"), "RunWithTimeout");
 
                 return new ResponseRename
                 {
@@ -4066,7 +4101,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.ImportWatchTable(softwarePath, importPath))
+                if (Portal.Serialized(() => Portal.ImportWatchTable(softwarePath, importPath), "ImportWatchTable"))
                 {
                     return new ResponseImportWatchTable
                     {
@@ -4153,7 +4188,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.ImportExternalSource(softwarePath, groupPath, importPath))
+                if (Portal.Serialized(() => Portal.ImportExternalSource(softwarePath, groupPath, importPath), "ImportExternalSource"))
                 {
                     return new ResponseImportExternalSource
                     {
@@ -4195,7 +4230,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.GenerateBlocksFromSource(softwarePath, sourceName))
+                if (Portal.Serialized(() => Portal.GenerateBlocksFromSource(softwarePath, sourceName), "GenerateBlocksFromSource"))
                 {
                     return new ResponseGenerateBlocksFromSource
                     {
@@ -4246,7 +4281,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.DeleteExternalSource(softwarePath, sourceName))
+                if (Portal.Serialized(() => Portal.DeleteExternalSource(softwarePath, sourceName), "DeleteExternalSource"))
                 {
                     return new ResponseDeleteExternalSource
                     {
@@ -4791,7 +4826,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var result = Portal.CopyToLibrary(softwarePath, blockPath, libraryFolder);
+                var result = Portal.Serialized(() => Portal.CopyToLibrary(softwarePath, blockPath, libraryFolder), "CopyToLibrary");
 
                 if (result)
                 {
@@ -4834,7 +4869,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var result = Portal.CopyFromLibrary(softwarePath, masterCopyName, targetGroupPath);
+                var result = Portal.Serialized(() => Portal.CopyFromLibrary(softwarePath, masterCopyName, targetGroupPath), "CopyFromLibrary");
 
                 if (result)
                 {
@@ -5108,7 +5143,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var file = Portal.ExportHmiTagTable(softwarePath, tagTableName, exportPath);
+                var file = Portal.Serialized(() => Portal.ExportHmiTagTable(softwarePath, tagTableName, exportPath), "ExportHmiTagTable");
 
                 return new ResponseExportHmiTagTable
                 {
@@ -5161,7 +5196,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var imported = Portal.ImportHmiTagTable(softwarePath, importPath);
+                var imported = Portal.Serialized(() => Portal.ImportHmiTagTable(softwarePath, importPath), "ImportHmiTagTable");
 
                 return new ResponseImportHmiTagTable
                 {
@@ -5303,7 +5338,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var file = Portal.ExportScreen(softwarePath, screenName, exportPath);
+                var file = Portal.Serialized(() => Portal.ExportScreen(softwarePath, screenName, exportPath), "ExportScreen");
 
                 return new ResponseExportScreen
                 {
@@ -5356,7 +5391,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var imported = Portal.ImportScreen(softwarePath, importPath);
+                var imported = Portal.Serialized(() => Portal.ImportScreen(softwarePath, importPath), "ImportScreen");
 
                 return new ResponseImportScreen
                 {
@@ -5386,9 +5421,189 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "GetScreenTemplates"), Description("Get a list of HMI screen templates (shared header/footer layouts) from the HMI software")]
+        public static ResponseScreens GetScreenTemplates(
+            [Description("softwarePath: defines the path in the project structure to the HMI software")] string softwarePath,
+            [Description("regexName: defines the name or regular expression to find the template. Use empty string (default) to find all")] string regexName = "")
+        {
+            try
+            {
+                var list = Portal.GetScreenTemplates(softwarePath, regexName);
+                var items = new List<ResponseScreenInfo>();
+                foreach (var obj in list)
+                {
+                    if (obj is global::Siemens.Engineering.IEngineeringObject eo)
+                    {
+                        string name = "";
+                        try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                        items.Add(new ResponseScreenInfo
+                        {
+                            Name = name,
+                            ScreenType = obj.GetType().Name,
+                            Attributes = Helper.GetAttributeList(eo)
+                        });
+                    }
+                }
+                return new ResponseScreens
+                {
+                    Message = $"HMI screen templates retrieved from '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error retrieving HMI screen templates from '{softwarePath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "ExportScreenTemplate"), Description("Export an HMI screen template to a SimaticML file")]
+        public static ResponseExportScreen ExportScreenTemplate(
+            [Description("softwarePath: defines the path in the project structure to the HMI software")] string softwarePath,
+            [Description("templateName: name of the HMI screen template to export")] string templateName,
+            [Description("exportPath: directory (the sanitized template name + .xml is appended) or full .xml file path")] string exportPath)
+        {
+            try
+            {
+                var file = Portal.Serialized(() => Portal.ExportScreenTemplate(softwarePath, templateName, exportPath), "ExportScreenTemplate");
+
+                return new ResponseExportScreen
+                {
+                    Message = $"HMI screen template '{templateName}' exported from '{softwarePath}' to '{file}'",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error exporting HMI screen template '{templateName}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "ImportScreenTemplate"), Description("Import an HMI screen template from a SimaticML file. Import templates BEFORE the screens that reference them. MUTATES the project (does not save).")]
+        public static ResponseImportScreen ImportScreenTemplate(
+            [Description("softwarePath: defines the path in the project structure to the HMI software")] string softwarePath,
+            [Description("importPath: defines the path of the XML file from where to import the screen template")] string importPath)
+        {
+            try
+            {
+                var imported = Portal.Serialized(() => Portal.ImportScreenTemplate(softwarePath, importPath), "ImportScreenTemplate");
+
+                return new ResponseImportScreen
+                {
+                    Message = $"HMI screen template(s) [{string.Join(", ", imported)}] imported from '{importPath}' to '{softwarePath}'. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error importing HMI screen template from '{importPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "DebugInspect"), Description("Inspect an object's Openness surface: attributes (with values), compositions (with counts) and services. Kinds: HmiTarget, TagTable, Tag, Screen, Connection, PlcSoftware, Block. Use to discover what the installed TIA version exposes.")]
+        public static ResponseDeviceTree DebugInspect(
+            [Description("softwarePath: path to the HMI or PLC software")] string softwarePath,
+            [Description("kind: HmiTarget | TagTable | Tag | Screen | Connection | PlcSoftware | Block")] string kind,
+            [Description("name: object name (empty for HmiTarget/PlcSoftware)")] string name = "",
+            [Description("parentName: for kind=Tag, the tag table name containing the tag")] string parentName = "")
+        {
+            try
+            {
+                var dump = Portal.DebugInspect(softwarePath, kind, name, parentName);
+
+                return new ResponseDeviceTree
+                {
+                    Message = $"Inspection of {kind} '{name}'",
+                    Tree = "```\n" + dump + "\n```",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error inspecting {kind} '{name}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         #endregion
 
         #region HMI Connections
+
+        [McpServerTool(Name = "ExportHmiConnection"), Description("Export an HMI connection to a SimaticML file (use as a template for ImportHmiConnection into another panel)")]
+        public static ResponseExportScreen ExportHmiConnection(
+            [Description("softwarePath: defines the path in the project structure to the HMI software")] string softwarePath,
+            [Description("connectionName: name of the HMI connection to export")] string connectionName,
+            [Description("exportPath: directory or full .xml file path")] string exportPath)
+        {
+            try
+            {
+                var file = Portal.Serialized(() => Portal.ExportHmiConnection(softwarePath, connectionName, exportPath), "ExportHmiConnection");
+
+                return new ResponseExportScreen
+                {
+                    Message = $"HMI connection '{connectionName}' exported from '{softwarePath}' to '{file}'",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error exporting HMI connection '{connectionName}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "ImportHmiConnection"), Description("Import an HMI connection from a SimaticML file (export one from a working panel, adapt name/partner, import here). MUTATES the project (does not save).")]
+        public static ResponseImportScreen ImportHmiConnection(
+            [Description("softwarePath: defines the path in the project structure to the HMI software")] string softwarePath,
+            [Description("importPath: defines the path of the XML file from where to import the connection")] string importPath)
+        {
+            try
+            {
+                var imported = Portal.Serialized(() => Portal.ImportHmiConnection(softwarePath, importPath), "ImportHmiConnection");
+
+                return new ResponseImportScreen
+                {
+                    Message = $"HMI connection(s) [{string.Join(", ", imported)}] imported from '{importPath}' to '{softwarePath}'. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error importing HMI connection from '{importPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
 
         [McpServerTool(Name = "GetHmiConnections"), Description("Get a list of HMI connections from the HMI software")]
         public static ResponseHmiConnections GetHmiConnections(
@@ -5479,11 +5694,13 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var list = Portal.GetDiscreteAlarms(softwarePath, regexName);
+                var list = Portal.Serialized(() => Portal.GetDiscreteAlarms(softwarePath, regexName), "GetDiscreteAlarms");
                 var items = BuildAlarmInfos(list);
                 return new ResponseDiscreteAlarms
                 {
-                    Message = $"Discrete alarms retrieved from '{softwarePath}'. On classic (Basic/Comfort) panels these are attached to HMI tags; create or edit them by re-importing the tag table XML (ExportHmiTagTable -> edit -> ImportHmiTagTable).",
+                    Message = $"Discrete alarms retrieved from '{softwarePath}'." + (items.Count == 0
+                        ? " NOTE: on classic (Basic/Comfort) panels TIA Openness V20 does NOT expose alarms at all - no alarm compositions exist on HmiTarget/TagTable/Tag and alarms are not serialized into the tag-table XML - so an empty list does not mean the panel has no alarms. Configure Basic-panel alarms in the TIA alarm editor (or its Excel import). Unified panels are fully readable here."
+                        : ""),
                     Items = items,
                     Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
                 };
@@ -5539,11 +5756,13 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var list = Portal.GetAnalogAlarms(softwarePath, regexName);
+                var list = Portal.Serialized(() => Portal.GetAnalogAlarms(softwarePath, regexName), "GetAnalogAlarms");
                 var items = BuildAlarmInfos(list);
                 return new ResponseAnalogAlarms
                 {
-                    Message = $"Analog alarms retrieved from '{softwarePath}'. On classic (Basic/Comfort) panels these are attached to HMI tags; create or edit them by re-importing the tag table XML (ExportHmiTagTable -> edit -> ImportHmiTagTable).",
+                    Message = $"Analog alarms retrieved from '{softwarePath}'." + (items.Count == 0
+                        ? " NOTE: on classic (Basic/Comfort) panels TIA Openness V20 does NOT expose alarms at all - no alarm compositions exist on HmiTarget/TagTable/Tag and alarms are not serialized into the tag-table XML - so an empty list does not mean the panel has no alarms. Configure Basic-panel alarms in the TIA alarm editor (or its Excel import). Unified panels are fully readable here."
+                        : ""),
                     Items = items,
                     Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
                 };
@@ -5601,7 +5820,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var file = Portal.ExportTextList(softwarePath, textListName, exportPath);
+                var file = Portal.Serialized(() => Portal.ExportTextList(softwarePath, textListName, exportPath), "ExportTextList");
 
                 return new ResponseExportTextList
                 {
@@ -5654,7 +5873,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var imported = Portal.ImportTextList(softwarePath, importPath);
+                var imported = Portal.Serialized(() => Portal.ImportTextList(softwarePath, importPath), "ImportTextList");
 
                 return new ResponseImportTextList
                 {
@@ -5780,7 +5999,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                var file = Portal.ExportTechnologyObject(softwarePath, objectName, exportPath);
+                var file = Portal.Serialized(() => Portal.ExportTechnologyObject(softwarePath, objectName, exportPath), "ExportTechnologyObject");
                 return new ResponseExportTechnologyObject
                 {
                     Message = $"Technology object '{objectName}' exported from '{softwarePath}' to '{file}'",
@@ -5809,7 +6028,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.ImportTechnologyObject(softwarePath, importPath))
+                if (Portal.Serialized(() => Portal.ImportTechnologyObject(softwarePath, importPath), "ImportTechnologyObject"))
                 {
                     return new ResponseImportTechnologyObject
                     {
@@ -5839,7 +6058,7 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                if (Portal.DeleteTechnologyObject(softwarePath, objectName))
+                if (Portal.Serialized(() => Portal.DeleteTechnologyObject(softwarePath, objectName), "DeleteTechnologyObject"))
                 {
                     return new ResponseDeleteTechnologyObject
                     {

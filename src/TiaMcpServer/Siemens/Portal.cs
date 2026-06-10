@@ -838,6 +838,217 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        /// <summary>
+        /// Plugs a new module into a device or device item slot - ET200SP cards by
+        /// order number (e.g. 'OrderNumber:6ES7 131-6BH01-0BA0/V1.1') or GSD
+        /// sub-modules by their GSD type identifier. MUTATES the project.
+        /// </summary>
+        public DeviceItem PlugModule(string parentPath, string typeIdentifier, string name, int positionNumber)
+        {
+            _logger?.LogInformation($"Plugging module '{typeIdentifier}' as '{name}' at position {positionNumber} into '{parentPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                // the parent may be a device (rack container) or a device item (rack, head module, IO-Link master)
+                HardwareObject? parent = GetDeviceItemByPath(parentPath);
+                if (parent == null)
+                {
+                    parent = GetDeviceByPath(parentPath);
+                }
+
+                if (parent == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No device or device item found at path '{parentPath}'. Use GetDeviceTree to list the exact paths.");
+                }
+
+                if (!parent.CanPlugNew(typeIdentifier, name, positionNumber))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams,
+                        $"Cannot plug '{typeIdentifier}' at position {positionNumber} of '{parentPath}'. " +
+                        "Check the type identifier (exact order number + version), that the position is free, " +
+                        "and that the parent is the correct rack/head module level (use GetDeviceTree).");
+                }
+
+                var item = RunWithTimeout(() => parent.PlugNew(typeIdentifier, name, positionNumber), 60, "PlugModule");
+
+                if (item == null)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"PlugNew returned no device item for '{typeIdentifier}'");
+                }
+
+                return item;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to plug module '{typeIdentifier}' into '{parentPath}'", null, ex);
+                pex.Data["parentPath"] = parentPath;
+                pex.Data["typeIdentifier"] = typeIdentifier;
+                pex.Data["name"] = name;
+                pex.Data["positionNumber"] = positionNumber;
+                _logger?.LogError(pex, "PlugModule failed for {ParentPath} {TypeIdentifier}", parentPath, typeIdentifier);
+                throw pex;
+            }
+        }
+
+        /// <summary>
+        /// Unplugs (deletes) a module device item. MUTATES the project.
+        /// </summary>
+        public void UnplugModule(string deviceItemPath)
+        {
+            _logger?.LogInformation($"Unplugging module at '{deviceItemPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var item = GetDeviceItemByPath(deviceItemPath);
+                if (item == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Device item not found at path '{deviceItemPath}'. Use GetDeviceTree to list the exact paths.");
+                }
+
+                RunWithTimeout<object?>(() => { item.Delete(); return null; }, 60, "UnplugModule");
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to unplug module at '{deviceItemPath}'", null, ex);
+                pex.Data["deviceItemPath"] = deviceItemPath;
+                _logger?.LogError(pex, "UnplugModule failed for {DeviceItemPath}", deviceItemPath);
+                throw pex;
+            }
+        }
+
+        /// <summary>
+        /// Renders the device-item hierarchy with the exact path segments the other
+        /// device tools resolve, so GSD/ungrouped device internals are discoverable.
+        /// </summary>
+        public string GetDeviceTree(string devicePath = "")
+        {
+            _logger?.LogInformation($"Getting device tree for: '{devicePath}'...");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var sb = new StringBuilder();
+
+            if (!string.IsNullOrWhiteSpace(devicePath))
+            {
+                var device = GetDeviceByPath(devicePath);
+                if (device != null)
+                {
+                    AppendDeviceTree(sb, device);
+                    return sb.ToString();
+                }
+
+                var deviceItem = GetDeviceItemByPath(devicePath);
+                if (deviceItem == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No device or device item found at path '{devicePath}'");
+                }
+
+                AppendDeviceItemTree(sb, deviceItem, 0);
+                return sb.ToString();
+            }
+
+            if (_project?.Devices != null)
+            {
+                foreach (Device device in _project.Devices)
+                {
+                    AppendDeviceTree(sb, device);
+                }
+            }
+
+            AppendDeviceGroupTrees(sb, _project?.DeviceGroups, "");
+
+            if (_project?.UngroupedDevicesGroup?.Devices != null)
+            {
+                sb.AppendLine("[Ungrouped devices]");
+                foreach (Device device in _project.UngroupedDevicesGroup.Devices)
+                {
+                    AppendDeviceTree(sb, device);
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private void AppendDeviceGroupTrees(StringBuilder sb, DeviceUserGroupComposition? groups, string prefix)
+        {
+            if (groups == null)
+            {
+                return;
+            }
+
+            foreach (DeviceUserGroup group in groups)
+            {
+                sb.AppendLine($"[Group] {prefix}{group.Name}");
+                foreach (Device device in group.Devices)
+                {
+                    AppendDeviceTree(sb, device, $"{prefix}{group.Name}/");
+                }
+                AppendDeviceGroupTrees(sb, group.Groups, $"{prefix}{group.Name}/");
+            }
+        }
+
+        private void AppendDeviceTree(StringBuilder sb, Device device, string prefix = "")
+        {
+            var typeId = "";
+            try { typeId = device.TypeIdentifier ?? ""; } catch { }
+            sb.AppendLine($"Device: {prefix}{device.Name}{(string.IsNullOrEmpty(typeId) ? "" : $" [{typeId}]")}");
+
+            foreach (DeviceItem item in device.DeviceItems)
+            {
+                AppendDeviceItemTree(sb, item, 1);
+            }
+        }
+
+        private void AppendDeviceItemTree(StringBuilder sb, DeviceItem item, int depth)
+        {
+            var indent = new string(' ', depth * 2);
+
+            var typeId = "";
+            try { typeId = item.TypeIdentifier ?? ""; } catch { }
+            if (string.IsNullOrEmpty(typeId))
+            {
+                try { typeId = item.GetAttribute("OrderNumber")?.ToString() ?? ""; } catch { }
+            }
+
+            var position = "";
+            try { position = $" pos={item.PositionNumber}"; } catch { }
+
+            var addresses = "";
+            try
+            {
+                var parts = new List<string>();
+                foreach (var address in item.Addresses)
+                {
+                    parts.Add($"%{(address.IoType.ToString() == "Input" ? "I" : address.IoType.ToString() == "Output" ? "Q" : address.IoType.ToString())}{address.StartAddress}..{address.StartAddress + Math.Max(address.Length / 8 - 1, 0)}");
+                }
+                if (parts.Count > 0)
+                {
+                    addresses = $" addresses: {string.Join(", ", parts)}";
+                }
+            }
+            catch { }
+
+            sb.AppendLine($"{indent}- {item.Name}{(string.IsNullOrEmpty(typeId) ? "" : $" [{typeId}]")}{position}{addresses}");
+
+            foreach (DeviceItem subItem in item.DeviceItems)
+            {
+                AppendDeviceItemTree(sb, subItem, depth + 1);
+            }
+        }
+
         public List<Subnet> GetSubnets()
         {
             _logger?.LogInformation("Getting subnets...");
@@ -4253,13 +4464,10 @@ namespace TiaMcpServer.Siemens
             if (index >= pathSegments.Length)
                 return null;
 
-            string segment = pathSegments[index];
-            SoftwareContainer? softwareContainer = null;
-
-            // in Devices
-            if (_project.Devices != null)
+            // in Devices (top-level and ungrouped)
+            foreach (var devices in RootDeviceCompositions())
             {
-                softwareContainer = GetSoftwareContainerInDevices(_project.Devices, pathSegments, index);
+                var softwareContainer = GetSoftwareContainerInDevices(devices, pathSegments, index);
                 if (softwareContainer != null)
                 {
                     return softwareContainer;
@@ -4269,7 +4477,7 @@ namespace TiaMcpServer.Siemens
             // in Groups
             if (_project.DeviceGroups != null)
             {
-                softwareContainer = GetSoftwareContainerInGroups(_project.DeviceGroups, pathSegments, index);
+                var softwareContainer = GetSoftwareContainerInGroups(_project.DeviceGroups, pathSegments, index);
                 if (softwareContainer != null)
                 {
                     return softwareContainer;
@@ -4281,28 +4489,19 @@ namespace TiaMcpServer.Siemens
 
         private SoftwareContainer? GetSoftwareContainerInDevices(DeviceComposition devices, string[] pathSegments, int index)
         {
-
-            if (index >= pathSegments.Length)
+            if (devices == null || index >= pathSegments.Length)
                 return null;
 
             string segment = pathSegments[index];
-            string nextSegment = index + 1 < pathSegments.Length ? pathSegments[index + 1] : string.Empty;
 
-            if (devices != null)
+            foreach (Device device in devices)
             {
-                SoftwareContainer? softwareContainer = null;
-                Device? device = null;
-                DeviceItem? deviceItem = null;
-
                 // a pc based plc has a Device.Name = 'PC-System_1' or something like that, which is visible in the TIA-Portal IDE
-                // use segment to find device
-                device = devices.FirstOrDefault(d => d.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
-                if (device != null)
+                // use segment to find device, then the following segments for the device item chain
+                if (device.Name.Equals(segment, StringComparison.OrdinalIgnoreCase))
                 {
-                    // then use next segment to find device item
-                    deviceItem = device.DeviceItems.FirstOrDefault(di => di.Name.Equals(nextSegment, StringComparison.OrdinalIgnoreCase));
-                    // but here we use next segment to find device item
-                    softwareContainer = GetSoftwareContainerInDeviceItem(deviceItem, pathSegments, index + 1);
+                    var item = FindDeviceItemInItems(device.DeviceItems, pathSegments, index + 1);
+                    var softwareContainer = item?.GetService<SoftwareContainer>();
                     if (softwareContainer != null)
                     {
                         return softwareContainer;
@@ -4310,15 +4509,13 @@ namespace TiaMcpServer.Siemens
                 }
 
                 // a hardware plc has a Device.Name = 'S7-1500/ET200MP-Station_1' or something like that, which is not visible in the TIA-Portal IDE
-                // ignored segment for Device.Name and use it for DeviceItem.Name
-                deviceItem = devices
-                    .SelectMany(d => d.DeviceItems)
-                    .FirstOrDefault(di => di.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
-                if (deviceItem != null)
+                // segment names a device item directly - scoped to this one device
+                var direct = FindDeviceItemInItems(device.DeviceItems, pathSegments, index);
+                var directContainer = direct?.GetService<SoftwareContainer>();
+                if (directContainer != null)
                 {
-                    return GetSoftwareContainerInDeviceItem(deviceItem, pathSegments, index);
+                    return directContainer;
                 }
-
             }
 
             return null;
@@ -4351,32 +4548,28 @@ namespace TiaMcpServer.Siemens
             return null;
         }
 
-        private SoftwareContainer? GetSoftwareContainerInDeviceItem(DeviceItem deviceItem, string[] pathSegments, int index)
-        {
-            if (deviceItem != null)
-            {
-                // when segment matched
-                if (index == pathSegments.Length - 1)
-                {
-                    // get from DeviceItem
-                    var softwareContainer = deviceItem.GetService<SoftwareContainer>();
-                    if (softwareContainer != null)
-                    {
-                        return softwareContainer;
-                    }
-                }
-            }
-
-            return null;
-        }
-
         #endregion
 
         #region Get...ByPath
 
+        // Device compositions a path may start in: top-level project devices and the
+        // ungrouped-devices system group (where GSD/PROFINET field devices land).
+        private IEnumerable<DeviceComposition> RootDeviceCompositions()
+        {
+            if (_project?.Devices != null)
+            {
+                yield return _project.Devices;
+            }
+
+            if (_project?.UngroupedDevicesGroup?.Devices != null)
+            {
+                yield return _project.UngroupedDevicesGroup.Devices;
+            }
+        }
+
         private Device? GetDeviceByPath(string devicePath)
         {
-            if (_project?.Devices == null || string.IsNullOrWhiteSpace(devicePath))
+            if (_project == null || string.IsNullOrWhiteSpace(devicePath))
                 return null;
 
             var pathSegments = devicePath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
@@ -4385,118 +4578,162 @@ namespace TiaMcpServer.Siemens
                 return null;
             }
 
-            // Try top-level device first
+            // Plain device name: top-level devices and ungrouped (GSD) devices
             if (pathSegments.Length == 1)
             {
-                return _project.Devices.FirstOrDefault(d => d.Name.Equals(pathSegments[0], StringComparison.OrdinalIgnoreCase));
+                foreach (var devices in RootDeviceCompositions())
+                {
+                    var found = devices.FirstOrDefault(d => d.Name.Equals(pathSegments[0], StringComparison.OrdinalIgnoreCase));
+                    if (found != null)
+                    {
+                        return found;
+                    }
+                }
+
+                return null;
             }
 
-            // Traverse device groups
-            DeviceUserGroupComposition? groups = _project.DeviceGroups;
-            DeviceUserGroup? group = groups?.FirstOrDefault(g => g.Name.Equals(pathSegments[0], StringComparison.OrdinalIgnoreCase));
+            // Group-prefixed path: walk the user group chain, last segment is the device
+            return FindDeviceInGroups(_project.DeviceGroups, pathSegments, 0);
+        }
 
+        private Device? FindDeviceInGroups(DeviceUserGroupComposition? groups, string[] segments, int index)
+        {
+            if (groups == null || index >= segments.Length)
+            {
+                return null;
+            }
+
+            var group = groups.FirstOrDefault(g => g.Name.Equals(segments[index], StringComparison.OrdinalIgnoreCase));
             if (group == null)
             {
                 return null;
             }
 
-            for (int i = 1; i < pathSegments.Length; i++)
+            if (index == segments.Length - 2)
             {
-                // Try to find device in current group
-                var device = group.Devices.FirstOrDefault(d => d.Name.Equals(pathSegments[i], StringComparison.OrdinalIgnoreCase));
+                var device = group.Devices.FirstOrDefault(d => d.Name.Equals(segments[index + 1], StringComparison.OrdinalIgnoreCase));
                 if (device != null)
                 {
                     return device;
                 }
+            }
 
-                // Try to find subgroup
-                group = group.Groups.FirstOrDefault(g => g.Name.Equals(pathSegments[i], StringComparison.OrdinalIgnoreCase));
-                if (group == null)
+            return FindDeviceInGroups(group.Groups, segments, index + 1);
+        }
+
+        private DeviceItem? GetDeviceItemByPath(string deviceItemPath)
+        {
+            if (_project == null || string.IsNullOrWhiteSpace(deviceItemPath))
+            {
+                return null;
+            }
+
+            var pathSegments = deviceItemPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (pathSegments.Length == 0)
+            {
+                return null;
+            }
+
+            // Top-level and ungrouped devices
+            foreach (var devices in RootDeviceCompositions())
+            {
+                var found = FindDeviceItemInDevices(devices, pathSegments, 0);
+                if (found != null)
                 {
-                    break;
+                    return found;
+                }
+            }
+
+            // Group-prefixed paths
+            return FindDeviceItemInGroups(_project.DeviceGroups, pathSegments, 0);
+        }
+
+        private DeviceItem? FindDeviceItemInGroups(DeviceUserGroupComposition? groups, string[] segments, int index)
+        {
+            if (groups == null || index >= segments.Length)
+            {
+                return null;
+            }
+
+            var group = groups.FirstOrDefault(g => g.Name.Equals(segments[index], StringComparison.OrdinalIgnoreCase));
+            if (group == null)
+            {
+                return null;
+            }
+
+            var found = FindDeviceItemInDevices(group.Devices, segments, index + 1);
+            if (found != null)
+            {
+                return found;
+            }
+
+            return FindDeviceItemInGroups(group.Groups, segments, index + 1);
+        }
+
+        // Resolves a device item path against one device composition. Matching is scoped:
+        // each path segment must name the device / a device item at that exact level
+        // (no global fall-through to identically-named items of other devices, which
+        // used to return the wrong device's rack for GSD paths).
+        private static DeviceItem? FindDeviceItemInDevices(DeviceComposition? devices, string[] segments, int index)
+        {
+            if (devices == null || index >= segments.Length)
+            {
+                return null;
+            }
+
+            foreach (Device device in devices)
+            {
+                // path includes the device name
+                if (device.Name.Equals(segments[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    var found = FindDeviceItemInItems(device.DeviceItems, segments, index + 1);
+                    if (found != null)
+                    {
+                        return found;
+                    }
+                }
+
+                // station name omitted (a hardware station's Device.Name like
+                // 'S7-1500/ET200MP-Station_1' is not visible in the IDE): the segment
+                // names a device item directly - but still scoped to this one device
+                var direct = FindDeviceItemInItems(device.DeviceItems, segments, index);
+                if (direct != null)
+                {
+                    return direct;
                 }
             }
 
             return null;
         }
 
-        private DeviceItem? GetDeviceItemByPath(string deviceItemPath)
+        private static DeviceItem? FindDeviceItemInItems(DeviceItemComposition? items, string[] segments, int index)
         {
-            if (_project == null || _project.Devices == null)
+            if (items == null || index >= segments.Length)
             {
                 return null;
             }
 
-            // Split the device path by '/' to get each device name  
-            var pathSegments = deviceItemPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-
-            DeviceItem? deviceItem = null;
-
-            // initial devices and groups
-            var devices = _project.Devices;
-            var groups = _project.DeviceGroups;
-
-            for (int index = 0; index < pathSegments.Length; index++)
+            foreach (DeviceItem item in items)
             {
-                deviceItem = GetDeviceItemFromDevice(pathSegments, devices, index);
-
-                if (deviceItem == null)
+                if (!item.Name.Equals(segments[index], StringComparison.OrdinalIgnoreCase))
                 {
-                    // search in groups
-                    var group = groups?.FirstOrDefault(g => g.Name.Equals(pathSegments[index], StringComparison.OrdinalIgnoreCase));
-                    if (group != null)
-                    {
-                        devices = group.Devices;
-                        if (devices != null)
-                        {
-                            deviceItem = GetDeviceItemFromDevice(pathSegments, devices, index + 1);
-                        }
-
-                        if (deviceItem != null)
-                        {
-                            return deviceItem;
-                        }
-
-                        // not found, but on the path
-                        groups = group.Groups;
-                        devices = group.Devices;
-                    }
+                    continue;
                 }
-                else
+
+                if (index == segments.Length - 1)
                 {
-                    return deviceItem;
+                    return item;
+                }
+
+                var found = FindDeviceItemInItems(item.DeviceItems, segments, index + 1);
+                if (found != null)
+                {
+                    return found;
                 }
             }
 
-            return deviceItem;
-        }
-
-        private static DeviceItem? GetDeviceItemFromDevice(string[] pathSegments, DeviceComposition? devices, int index)
-        {
-            string segment = pathSegments[index];
-            string nextSegment = index + 1 < pathSegments.Length ? pathSegments[index + 1] : string.Empty;
-
-            DeviceItem? deviceItem = null;
-
-            // a pc based plc has a Device.Name = 'PC-System_1' or something like that, which is visible in the TIA-Portal IDE
-            // use segment to find device
-            var device = devices.FirstOrDefault(d => d.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
-            if (device != null)
-            {
-                // then use next segment to find device item
-                deviceItem = device.DeviceItems.FirstOrDefault(di => di.Name.Equals(nextSegment, StringComparison.OrdinalIgnoreCase));
-
-            }
-
-            // a hardware plc has a Device.Name = 'S7-1500/ET200MP-Station_1' or something like that, which is not visible in the TIA-Portal IDE
-            if (device == null)
-            {
-                deviceItem = devices
-                .SelectMany(d => d.DeviceItems)
-                .FirstOrDefault(di => di.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
-            }
-
-            return deviceItem;
+            return null;
         }
 
         private PlcBlockGroup? GetPlcBlockGroupByPath(string softwarePath, string groupPath)

@@ -611,6 +611,101 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "PlugModule"), Description("Plug a module into a device/rack slot: ET200SP cards or GSD sub-modules by type identifier. MUTATES the project (does not save).")]
+        public static ResponsePlugModule PlugModule(
+            [Description("parentPath: path to the device or device item to plug into, e.g. 'ET200SP_1/Rack_0' or a GSD head module (use GetDeviceTree to list exact paths)")] string parentPath,
+            [Description("typeIdentifier: module type identifier, e.g. 'OrderNumber:6ES7 131-6BH01-0BA0/V1.1' or a GSD submodule identifier like 'GSD:GSDML-V2.41-...#...'")] string typeIdentifier,
+            [Description("name: the name for the new module")] string name,
+            [Description("positionNumber: the slot/position number to plug into")] int positionNumber)
+        {
+            try
+            {
+                var item = Portal.PlugModule(parentPath, typeIdentifier, name, positionNumber);
+
+                return new ResponsePlugModule
+                {
+                    Message = $"Module '{item.Name}' plugged into '{parentPath}' at position {positionNumber}. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Name = item.Name,
+                    TypeIdentifier = typeIdentifier,
+                    PositionNumber = positionNumber,
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true
+                    }
+                };
+            }
+            catch (PortalException pex)
+            {
+                throw new McpException($"Failed to plug module '{typeIdentifier}' into '{parentPath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error plugging module '{typeIdentifier}' into '{parentPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "UnplugModule"), Description("Unplug (delete) a module device item from its slot. MUTATES the project (does not save).")]
+        public static ResponseDeleteResult UnplugModule(
+            [Description("deviceItemPath: path to the module device item to remove (use GetDeviceTree to list exact paths)")] string deviceItemPath)
+        {
+            try
+            {
+                Portal.UnplugModule(deviceItemPath);
+
+                return new ResponseDeleteResult
+                {
+                    Success = true,
+                    Name = deviceItemPath.Contains("/") ? deviceItemPath.Substring(deviceItemPath.LastIndexOf("/") + 1) : deviceItemPath,
+                    Message = $"Module at '{deviceItemPath}' unplugged. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true
+                    }
+                };
+            }
+            catch (PortalException pex)
+            {
+                throw new McpException($"Failed to unplug module at '{deviceItemPath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error unplugging module at '{deviceItemPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "GetDeviceTree"), Description("Get the device/module hierarchy as a tree with exact resolvable paths, type identifiers, positions and I/O addresses. Covers grouped, top-level and ungrouped (GSD) devices.")]
+        public static ResponseDeviceTree GetDeviceTree(
+            [Description("devicePath: optional path to a device or device item to scope the tree; empty for all devices")] string devicePath = "")
+        {
+            try
+            {
+                var tree = Portal.GetDeviceTree(devicePath);
+
+                return new ResponseDeviceTree
+                {
+                    Message = string.IsNullOrWhiteSpace(devicePath)
+                        ? "Device tree retrieved for all devices"
+                        : $"Device tree retrieved for '{devicePath}'",
+                    Tree = "```\n" + tree + "\n```",
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true
+                    }
+                };
+            }
+            catch (PortalException pex)
+            {
+                throw new McpException($"Failed to get device tree for '{devicePath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error getting device tree for '{devicePath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         [McpServerTool(Name = "CreateDeviceGroup"), Description("Create a device group for organizing devices in the project")]
         public static ResponseCreateDeviceGroup CreateDeviceGroup(
             [Description("groupName: the name for the new device group")] string groupName,

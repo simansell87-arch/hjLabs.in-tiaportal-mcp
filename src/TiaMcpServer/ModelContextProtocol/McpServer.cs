@@ -1378,11 +1378,12 @@ namespace TiaMcpServer.ModelContextProtocol
             [Description("softwarePath: path to the plc software")] string softwarePath,
             [Description("sclSource: full SCL source including the FUNCTION/FUNCTION_BLOCK/ORGANIZATION_BLOCK/DATA_BLOCK declaration and END_*")] string sclSource,
             [Description("compile: compile the software after generating (default true)")] bool compile = true,
-            [Description("overwrite: allow replacing an existing block of the same name (default false)")] bool overwrite = false)
+            [Description("overwrite: allow replacing an existing block of the same name (default false)")] bool overwrite = false,
+            [Description("groupPath: optional block group to place the authored block(s) into, e.g. 'Group/Subgroup'; generated blocks otherwise land at the program-blocks root. Triggers a compile (the placement needs consistent blocks).")] string groupPath = "")
         {
             try
             {
-                var (blocks, compiled, summary) = Portal.WriteBlockScl(softwarePath, sclSource, compile, overwrite);
+                var (blocks, compiled, summary) = Portal.WriteBlockScl(softwarePath, sclSource, compile, overwrite, groupPath);
                 return new ResponseWriteBlock
                 {
                     Message = $"SCL written to '{softwarePath}'",
@@ -2008,15 +2009,16 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
-        [McpServerTool(Name = "CopyBlock"), Description("Copy a block to another group in the plc software")]
+        [McpServerTool(Name = "CopyBlock"), Description("Copy a block to another group in the plc software (XML export/import based; the block must be compiled). Block names are program-unique, so the copy gets a new name. MUTATES the project (does not save).")]
         public static ResponseCopyBlock CopyBlock(
             [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
             [Description("sourceBlockPath: full path to the source block, e.g. 'Group/Subgroup/Name'")] string sourceBlockPath,
-            [Description("targetGroupPath: path to the target group where the block will be copied, e.g. 'Group/Subgroup'")] string targetGroupPath)
+            [Description("targetGroupPath: path to the target group where the block will be copied, e.g. 'Group/Subgroup'; empty for the program-blocks root")] string targetGroupPath,
+            [Description("newName: name for the copy (default '<Name>_Copy')")] string newName = "")
         {
             try
             {
-                var block = Portal.CopyBlock(softwarePath, sourceBlockPath, targetGroupPath);
+                var block = Portal.CopyBlock(softwarePath, sourceBlockPath, targetGroupPath, newName);
 
                 if (block != null)
                 {

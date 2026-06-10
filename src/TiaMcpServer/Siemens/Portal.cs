@@ -2051,7 +2051,7 @@ namespace TiaMcpServer.Siemens
         /// Creates or replaces a block from SCL source text: imports the source, generates the
         /// block, removes the transient external source, and optionally compiles. MUTATES the project.
         /// </summary>
-        public (List<string> AffectedBlocks, bool Compiled, string CompileSummary) WriteBlockScl(string softwarePath, string sclSource, bool compile, bool overwrite)
+        public (List<string> AffectedBlocks, bool Compiled, string CompileSummary) WriteBlockScl(string softwarePath, string sclSource, bool compile, bool overwrite, string groupPath = "")
         {
             _logger?.LogInformation("Writing block(s) from SCL source...");
 
@@ -2119,7 +2119,10 @@ namespace TiaMcpServer.Siemens
 
                 bool compiled = false;
                 string summary = "(not compiled)";
-                if (compile)
+
+                // relocation goes through XML export, which needs consistent blocks
+                var mustCompile = compile || (!string.IsNullOrWhiteSpace(groupPath) && affected.Count > 0);
+                if (mustCompile)
                 {
                     var result = CompileSoftware(softwarePath);
                     if (result != null)
@@ -2130,6 +2133,41 @@ namespace TiaMcpServer.Siemens
                         int warns = msgs.Count(m => m.Contains("[Warning]"));
                         compiled = result.State.ToString() != "Error";
                         summary = $"{(compiled ? "SUCCESS" : "FAILED")}: {errs} error(s), {warns} warning(s)";
+                        if (!compile)
+                        {
+                            summary += " (auto-compiled to allow groupPath placement)";
+                        }
+                    }
+                }
+
+                // generated blocks land at the program-blocks root; place them if requested
+                if (!string.IsNullOrWhiteSpace(groupPath) && affected.Count > 0)
+                {
+                    if (!compiled)
+                    {
+                        summary += $" - blocks NOT moved to '{groupPath}' (compile failed; the move needs consistent blocks)";
+                    }
+                    else
+                    {
+                        var moved = new List<string>();
+                        var moveErrors = new List<string>();
+                        foreach (var name in affected)
+                        {
+                            try
+                            {
+                                MoveBlock(softwarePath, name, groupPath);
+                                moved.Add(name);
+                            }
+                            catch (Exception mex)
+                            {
+                                moveErrors.Add($"{name}: {mex.Message}");
+                            }
+                        }
+                        summary += $" - moved {moved.Count}/{affected.Count} block(s) to '{groupPath}'";
+                        if (moveErrors.Count > 0)
+                        {
+                            summary += $" (errors: {string.Join("; ", moveErrors)})";
+                        }
                     }
                 }
 
@@ -3332,14 +3370,189 @@ namespace TiaMcpServer.Siemens
             }
         }
 
-        public PlcBlock? CopyBlock(string softwarePath, string sourceBlockPath, string targetGroupPath)
+        // Openness has no first-class copy/move between PlcBlockGroups, so both are
+        // implemented as export-to-temp-XML + import. The block must be consistent
+        // (compiled), because TIA refuses to export inconsistent blocks.
+
+        public PlcBlock? CopyBlock(string softwarePath, string sourceBlockPath, string targetGroupPath, string newName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Copying block '{sourceBlockPath}' to '{targetGroupPath}'" + (string.IsNullOrEmpty(newName) ? "" : $" as '{newName}'"));
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var block = GetBlock(softwarePath, sourceBlockPath);
+                if (block == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Block '{sourceBlockPath}' not found");
+                }
+                if (!block.IsConsistent)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Block '{block.Name}' is inconsistent (not compiled); compile it first - the copy goes through XML export.");
+                }
+
+                var targetGroup = GetPlcBlockGroupByPath(softwarePath, targetGroupPath ?? "");
+                if (targetGroup == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Target group '{targetGroupPath}' not found");
+                }
+
+                // block names are unique per PLC program, so a same-software copy needs a new name
+                var copyName = string.IsNullOrWhiteSpace(newName) ? block.Name + "_Copy" : newName;
+                if (GetBlocks(softwarePath).Any(b => b.Name.Equals(copyName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"A block named '{copyName}' already exists; pass a different newName.");
+                }
+
+                var tempDir = Path.Combine(Path.GetTempPath(), "tia_copyblock_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tempDir);
+                try
+                {
+                    var file = Path.Combine(tempDir, "block.xml");
+                    block.Export(new FileInfo(file), ExportOptions.None);
+
+                    // rewrite the block name and let TIA renumber on conflict
+                    var doc = XDocument.Load(file);
+                    var blockEl = doc.Descendants().FirstOrDefault(e => e.Name.LocalName.StartsWith("SW.Blocks."));
+                    var attrList = blockEl?.Elements().FirstOrDefault(e => e.Name.LocalName == "AttributeList");
+                    var nameEl = attrList?.Elements().FirstOrDefault(e => e.Name.LocalName == "Name");
+                    if (nameEl == null)
+                    {
+                        throw new PortalException(PortalErrorCode.InvalidState, "Could not locate the Name element in the exported block XML");
+                    }
+                    nameEl.Value = copyName;
+                    var autoNumberEl = attrList!.Elements().FirstOrDefault(e => e.Name.LocalName == "AutoNumber");
+                    if (autoNumberEl != null)
+                    {
+                        autoNumberEl.Value = "true";
+                    }
+                    doc.Save(file);
+
+                    var imported = targetGroup.Blocks.Import(new FileInfo(file), ImportOptions.Override);
+                    if (imported == null || imported.Count == 0)
+                    {
+                        throw new PortalException(PortalErrorCode.InvalidState, "Import of the copied block returned nothing");
+                    }
+
+                    return imported[0];
+                }
+                finally
+                {
+                    try { Directory.Delete(tempDir, true); } catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to copy block '{sourceBlockPath}' to '{targetGroupPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["sourceBlockPath"] = sourceBlockPath;
+                pex.Data["targetGroupPath"] = targetGroupPath;
+                _logger?.LogError(pex, "CopyBlock failed for {SourceBlockPath} -> {TargetGroupPath}", sourceBlockPath, targetGroupPath);
+                throw pex;
+            }
         }
 
         public void MoveBlock(string softwarePath, string sourceBlockPath, string targetGroupPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Moving block '{sourceBlockPath}' to '{targetGroupPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var block = GetBlock(softwarePath, sourceBlockPath);
+                if (block == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Block '{sourceBlockPath}' not found");
+                }
+                if (!block.IsConsistent)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"Block '{block.Name}' is inconsistent (not compiled); compile it first - the move goes through XML export.");
+                }
+
+                var targetGroup = GetPlcBlockGroupByPath(softwarePath, targetGroupPath ?? "");
+                if (targetGroup == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Target group '{targetGroupPath}' not found");
+                }
+
+                var sourceGroup = block.Parent as PlcBlockGroup;
+                if (sourceGroup != null && sourceGroup == targetGroup)
+                {
+                    return; // already there
+                }
+
+                var tempDir = Path.Combine(Path.GetTempPath(), "tia_moveblock_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tempDir);
+                var blockName = block.Name;
+                try
+                {
+                    var file = Path.Combine(tempDir, "block.xml");
+                    block.Export(new FileInfo(file), ExportOptions.None);
+
+                    // names are program-unique: the original must go before the import
+                    block.Delete();
+
+                    try
+                    {
+                        var imported = targetGroup.Blocks.Import(new FileInfo(file), ImportOptions.Override);
+                        if (imported == null || imported.Count == 0)
+                        {
+                            throw new PortalException(PortalErrorCode.InvalidState, "Import into the target group returned nothing");
+                        }
+                    }
+                    catch (Exception importEx)
+                    {
+                        // restore the block where it came from rather than losing it
+                        try
+                        {
+                            sourceGroup?.Blocks.Import(new FileInfo(file), ImportOptions.Override);
+                            throw new PortalException(PortalErrorCode.InvalidState,
+                                $"Import into '{targetGroupPath}' failed ({importEx.Message}); the block was restored to its original group.", null, importEx);
+                        }
+                        catch (PortalException)
+                        {
+                            throw;
+                        }
+                        catch (Exception restoreEx)
+                        {
+                            throw new PortalException(PortalErrorCode.InvalidState,
+                                $"Import into '{targetGroupPath}' failed ({importEx.Message}) AND restoring failed ({restoreEx.Message}). " +
+                                $"The block XML is preserved at '{file}' - re-import it manually with ImportBlock.", null, importEx);
+                        }
+                    }
+                }
+                finally
+                {
+                    // keep the temp dir only if the move ended in the unrecoverable branch
+                    try
+                    {
+                        var keep = Directory.Exists(tempDir) &&
+                                   GetBlocks(softwarePath).All(b => !b.Name.Equals(blockName, StringComparison.OrdinalIgnoreCase));
+                        if (!keep)
+                        {
+                            Directory.Delete(tempDir, true);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to move block '{sourceBlockPath}' to '{targetGroupPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["sourceBlockPath"] = sourceBlockPath;
+                pex.Data["targetGroupPath"] = targetGroupPath;
+                _logger?.LogError(pex, "MoveBlock failed for {SourceBlockPath} -> {TargetGroupPath}", sourceBlockPath, targetGroupPath);
+                throw pex;
+            }
         }
 
         #endregion
@@ -3419,7 +3632,47 @@ namespace TiaMcpServer.Siemens
 
         public void DeleteBlockGroup(string softwarePath, string groupPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Deleting block group '{groupPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                if (string.IsNullOrWhiteSpace(groupPath))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Cannot delete the root block group");
+                }
+
+                var group = GetPlcBlockGroupByPath(softwarePath, groupPath);
+                if (group == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Block group '{groupPath}' not found");
+                }
+
+                if (group is not PlcBlockUserGroup userGroup)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"'{groupPath}' is a system group and cannot be deleted");
+                }
+
+                if (group.Blocks.Count > 0 || group.Groups.Count > 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState,
+                        $"Block group '{groupPath}' is not empty ({group.Blocks.Count} block(s), {group.Groups.Count} subgroup(s)); move or delete its contents first.");
+                }
+
+                userGroup.Delete();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to delete block group '{groupPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["groupPath"] = groupPath;
+                _logger?.LogError(pex, "DeleteBlockGroup failed for {SoftwarePath} {GroupPath}", softwarePath, groupPath);
+                throw pex;
+            }
         }
 
         public (string Name, string Path, int BlockCount, int SubGroupCount) GetBlockGroupInfo(string softwarePath, string groupPath)
@@ -3499,7 +3752,47 @@ namespace TiaMcpServer.Siemens
 
         public void DeleteTypeGroup(string softwarePath, string groupPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Deleting type group '{groupPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                if (string.IsNullOrWhiteSpace(groupPath))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Cannot delete the root type group");
+                }
+
+                var group = GetPlcTypeGroupByPath(softwarePath, groupPath);
+                if (group == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"Type group '{groupPath}' not found");
+                }
+
+                if (group is not PlcTypeUserGroup userGroup)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"'{groupPath}' is a system group and cannot be deleted");
+                }
+
+                if (group.Types.Count > 0 || group.Groups.Count > 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState,
+                        $"Type group '{groupPath}' is not empty ({group.Types.Count} type(s), {group.Groups.Count} subgroup(s)); move or delete its contents first.");
+                }
+
+                userGroup.Delete();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to delete type group '{groupPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["groupPath"] = groupPath;
+                _logger?.LogError(pex, "DeleteTypeGroup failed for {SoftwarePath} {GroupPath}", softwarePath, groupPath);
+                throw pex;
+            }
         }
 
         public (string Name, string Path, int TypeCount, int SubGroupCount) GetTypeGroupInfo(string softwarePath, string groupPath)

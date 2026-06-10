@@ -1053,6 +1053,88 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "CreateSubnet"), Description("Create a PROFINET/Ethernet subnet seeded from a device interface (or connect the interface to it if it already exists - idempotent). MUTATES the project (does not save).")]
+        public static ResponseCreateSubnet CreateSubnet(
+            [Description("deviceItemPath: path to the interface device item (usually the CPU's PROFINET interface) or its device - the first network interface found is used. Use GetDeviceTree for exact paths.")] string deviceItemPath,
+            [Description("subnetName: name for the subnet, e.g. 'PN/IE_1'")] string subnetName)
+        {
+            try
+            {
+                var (name, connectedInterface, created) = Portal.CreateSubnet(deviceItemPath, subnetName);
+
+                return new ResponseCreateSubnet
+                {
+                    Message = created
+                        ? $"Subnet '{name}' created and '{connectedInterface}' connected to it. NOTE: the project is modified but NOT saved - call SaveProject to persist."
+                        : $"Subnet '{name}' already existed; '{connectedInterface}' is connected to it.",
+                    SubnetName = name,
+                    ConnectedInterface = connectedInterface,
+                    Created = created,
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true
+                    }
+                };
+            }
+            catch (PortalException pex)
+            {
+                throw new McpException($"Failed to create subnet '{subnetName}' from '{deviceItemPath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error creating subnet '{subnetName}' from '{deviceItemPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "ConnectIoDevice"), Description("Network a PROFINET IO device (e.g. ET200SP, GSD device) to a controller: puts both on the subnet (created if needed), creates the controller's IO system if needed and connects the device to it - this is what assigns real %I/%Q addresses to plugged modules. Idempotent. MUTATES the project (does not save).")]
+        public static ResponseConnectIoDevice ConnectIoDevice(
+            [Description("deviceItemPath: the IO device's PROFINET interface device item or its device, e.g. 'ET200SP' (the first network interface found is used)")] string deviceItemPath,
+            [Description("controllerItemPath: the controller's PROFINET interface device item or its device, e.g. 'PLC_1/PROFINET interface_1'")] string controllerItemPath,
+            [Description("subnetName: subnet to use; created if absent (default 'PN/IE_1')")] string subnetName = "PN/IE_1",
+            [Description("ioSystemName: IO system name when one has to be created (default 'PROFINET IO-System')")] string ioSystemName = "PROFINET IO-System",
+            [Description("deviceIp: optional IP address to set on the IO device's node, e.g. '192.168.0.2'")] string deviceIp = "",
+            [Description("controllerIp: optional IP address to set on the controller's node, e.g. '192.168.0.1'")] string controllerIp = "")
+        {
+            try
+            {
+                var (device, controller, subnet, ioSystem, addresses) = Portal.ConnectIoDevice(deviceItemPath, controllerItemPath, subnetName, ioSystemName, deviceIp, controllerIp);
+
+                var items = addresses.Select(a => new ResponseAddressInfo
+                {
+                    Module = a.Module,
+                    IoType = a.IoType,
+                    StartAddress = a.StartAddress,
+                    Length = a.Length
+                }).ToList();
+
+                return new ResponseConnectIoDevice
+                {
+                    Message = $"IO device '{device}' connected to controller '{controller}' on subnet '{subnet}' (IO system '{ioSystem}'). " +
+                              $"{items.Count} address range(s) assigned. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Device = device,
+                    Controller = controller,
+                    SubnetName = subnet,
+                    IoSystemName = ioSystem,
+                    Addresses = items,
+                    Meta = new JsonObject
+                    {
+                        ["timestamp"] = DateTime.Now,
+                        ["success"] = true,
+                        ["assignedRanges"] = items.Count
+                    }
+                };
+            }
+            catch (PortalException pex)
+            {
+                throw new McpException($"Failed to connect IO device '{deviceItemPath}' to '{controllerItemPath}': {pex.Message}", pex, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error connecting IO device '{deviceItemPath}' to '{controllerItemPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         [McpServerTool(Name = "ImportGsdFile"), Description("Import a GSD/GSDML file into the current project")]
         public static ResponseImportGsdFile ImportGsdFile(
             [Description("gsdFilePath: the full file path to the GSD/GSDML file to import")] string gsdFilePath)

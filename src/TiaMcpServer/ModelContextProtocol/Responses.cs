@@ -453,6 +453,30 @@ namespace TiaMcpServer.ModelContextProtocol
     {
     }
 
+    public class ResponseCreateSubnet : ResponseMessage
+    {
+        public string? SubnetName { get; set; }
+        public string? ConnectedInterface { get; set; }
+        public bool Created { get; set; }
+    }
+
+    public class ResponseAddressInfo
+    {
+        public string? Module { get; set; }
+        public string? IoType { get; set; }
+        public int StartAddress { get; set; }
+        public int Length { get; set; }
+    }
+
+    public class ResponseConnectIoDevice : ResponseMessage
+    {
+        public string? Device { get; set; }
+        public string? Controller { get; set; }
+        public string? SubnetName { get; set; }
+        public string? IoSystemName { get; set; }
+        public IEnumerable<ResponseAddressInfo>? Addresses { get; set; }
+    }
+
     public class ResponseImportGsdFile : ResponseMessage
     {
     }

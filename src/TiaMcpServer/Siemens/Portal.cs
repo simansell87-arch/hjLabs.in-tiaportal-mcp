@@ -967,6 +967,233 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        // Resolves a path to the NetworkInterface feature it carries. Accepts the
+        // interface device item itself, or any device/rack/head path - in that case
+        // the first NetworkInterface-bearing descendant is used (the realistic input,
+        // since users pass 'ET200SP' rather than '.../PROFINET interface_1').
+        private NetworkInterface ResolveNetworkInterface(string path, out string resolvedName)
+        {
+            var deviceItem = GetDeviceItemByPath(path);
+            if (deviceItem != null)
+            {
+                var itf = FindNetworkInterface(deviceItem);
+                if (itf != null)
+                {
+                    resolvedName = deviceItem.Name;
+                    return itf;
+                }
+            }
+
+            var device = GetDeviceByPath(path);
+            if (device != null)
+            {
+                foreach (DeviceItem item in device.DeviceItems)
+                {
+                    var itf = FindNetworkInterface(item);
+                    if (itf != null)
+                    {
+                        resolvedName = device.Name;
+                        return itf;
+                    }
+                }
+            }
+
+            throw new PortalException(PortalErrorCode.NotFound,
+                $"No network interface found at or below '{path}'. Use GetDeviceTree to find the PROFINET interface item.");
+        }
+
+        /// <summary>
+        /// Creates a PROFINET/Ethernet subnet seeded from a device interface's node,
+        /// or connects the node to the subnet if it already exists (idempotent).
+        /// MUTATES the project.
+        /// </summary>
+        public (string SubnetName, string ConnectedInterface, bool Created) CreateSubnet(string deviceItemPath, string subnetName)
+        {
+            _logger?.LogInformation($"Creating subnet '{subnetName}' from '{deviceItemPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                if (string.IsNullOrWhiteSpace(subnetName))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "subnetName cannot be empty");
+                }
+
+                var itf = ResolveNetworkInterface(deviceItemPath, out var resolvedName);
+                if (itf.Nodes == null || itf.Nodes.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, $"The network interface at '{deviceItemPath}' has no nodes");
+                }
+
+                var node = itf.Nodes[0];
+                var project = _project as Project;
+                var existing = project?.Subnets?.FirstOrDefault(s => s.Name.Equals(subnetName, StringComparison.OrdinalIgnoreCase));
+
+                if (existing != null)
+                {
+                    var connected = node.ConnectedSubnet;
+                    if (connected == null || !connected.Name.Equals(existing.Name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        RunWithTimeout<object?>(() => { node.ConnectToSubnet(existing); return null; }, 60, "CreateSubnet(connect)");
+                    }
+                    return (existing.Name, resolvedName, false);
+                }
+
+                var subnet = RunWithTimeout(() => node.CreateAndConnectToSubnet(subnetName), 60, "CreateSubnet");
+                return (subnet.Name, resolvedName, true);
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to create subnet '{subnetName}' from '{deviceItemPath}'", null, ex);
+                pex.Data["deviceItemPath"] = deviceItemPath;
+                pex.Data["subnetName"] = subnetName;
+                _logger?.LogError(pex, "CreateSubnet failed for {DeviceItemPath} {SubnetName}", deviceItemPath, subnetName);
+                throw pex;
+            }
+        }
+
+        /// <summary>
+        /// Networks a PROFINET IO device to a controller: puts both interfaces on the
+        /// subnet (created if needed), ensures the controller has an IO system, and
+        /// connects the device's IO connector to it - the step that assigns real
+        /// %I/%Q addresses to plugged modules. Optionally sets IP addresses.
+        /// Idempotent for the subnet, IO system and an existing connection.
+        /// MUTATES the project.
+        /// </summary>
+        public (string Device, string Controller, string SubnetName, string IoSystemName, List<(string Module, string IoType, int StartAddress, int Length)> Addresses)
+            ConnectIoDevice(string deviceItemPath, string controllerItemPath, string subnetName = "PN/IE_1", string ioSystemName = "PROFINET IO-System", string deviceIp = "", string controllerIp = "")
+        {
+            _logger?.LogInformation($"Connecting IO device '{deviceItemPath}' to controller '{controllerItemPath}' (subnet '{subnetName}', IO system '{ioSystemName}')");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var devItf = ResolveNetworkInterface(deviceItemPath, out var deviceName);
+                var ctrlItf = ResolveNetworkInterface(controllerItemPath, out var controllerName);
+
+                if (ctrlItf.IoControllers == null || ctrlItf.IoControllers.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams,
+                        $"'{controllerItemPath}' is not a PROFINET IO controller (no IoControllers on its interface). Pass the CPU's PROFINET interface.");
+                }
+                if (devItf.IoConnectors == null || devItf.IoConnectors.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams,
+                        $"'{deviceItemPath}' is not a PROFINET IO device (no IoConnectors on its interface). Pass the IO device's PROFINET interface.");
+                }
+
+                // 1. subnet: create from the controller side, then bring the device node onto it
+                var (actualSubnetName, _, _) = CreateSubnet(controllerItemPath, subnetName);
+                var project = _project as Project;
+                var subnet = project!.Subnets.First(s => s.Name.Equals(actualSubnetName, StringComparison.OrdinalIgnoreCase));
+
+                var devNode = devItf.Nodes[0];
+                var devConnected = devNode.ConnectedSubnet;
+                if (devConnected == null || !devConnected.Name.Equals(subnet.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    RunWithTimeout<object?>(() => { devNode.ConnectToSubnet(subnet); return null; }, 60, "ConnectIoDevice(subnet)");
+                }
+
+                // 2. IO system on the controller
+                var ioController = ctrlItf.IoControllers[0];
+                var ioSystem = ioController.IoSystem;
+                if (ioSystem == null)
+                {
+                    ioSystem = RunWithTimeout(() => ioController.CreateIoSystem(ioSystemName), 60, "ConnectIoDevice(CreateIoSystem)");
+                }
+
+                // 3. assign the device to the IO system
+                var connector = devItf.IoConnectors[0];
+                var alreadyConnected = false;
+                try
+                {
+                    var current = connector.ConnectedToIoSystem;
+                    alreadyConnected = current != null && current.Name.Equals(ioSystem.Name, StringComparison.OrdinalIgnoreCase);
+                }
+                catch (Exception)
+                {
+                }
+                if (!alreadyConnected)
+                {
+                    var system = ioSystem;
+                    RunWithTimeout<object?>(() => { connector.ConnectToIoSystem(system); return null; }, 60, "ConnectIoDevice(ConnectToIoSystem)");
+                }
+
+                // 4. optional IP addresses
+                if (!string.IsNullOrWhiteSpace(controllerIp))
+                {
+                    try { ctrlItf.Nodes[0].SetAttribute("Address", controllerIp); }
+                    catch (Exception ex) { _logger?.LogWarning(ex, "Setting controller IP failed"); }
+                }
+                if (!string.IsNullOrWhiteSpace(deviceIp))
+                {
+                    try { devNode.SetAttribute("Address", deviceIp); }
+                    catch (Exception ex) { _logger?.LogWarning(ex, "Setting device IP failed"); }
+                }
+
+                // 5. read back the device's now-assigned addresses for confirmation
+                var addresses = new List<(string Module, string IoType, int StartAddress, int Length)>();
+                var devItem = GetDeviceItemByPath(deviceItemPath);
+                var root = devItem != null ? FindRootDevice(devItem) : GetDeviceByPath(deviceItemPath);
+                if (root != null)
+                {
+                    CollectAssignedAddresses(root.DeviceItems, addresses);
+                }
+
+                return (deviceName, controllerName, subnet.Name, ioSystem.Name, addresses);
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to connect IO device '{deviceItemPath}' to controller '{controllerItemPath}'", null, ex);
+                pex.Data["deviceItemPath"] = deviceItemPath;
+                pex.Data["controllerItemPath"] = controllerItemPath;
+                pex.Data["subnetName"] = subnetName;
+                pex.Data["ioSystemName"] = ioSystemName;
+                _logger?.LogError(pex, "ConnectIoDevice failed for {DeviceItemPath} -> {ControllerItemPath}", deviceItemPath, controllerItemPath);
+                throw pex;
+            }
+        }
+
+        private static Device? FindRootDevice(DeviceItem item)
+        {
+            object? current = item;
+            while (current is DeviceItem di)
+            {
+                current = di.Parent;
+            }
+            return current as Device;
+        }
+
+        private static void CollectAssignedAddresses(DeviceItemComposition items, List<(string Module, string IoType, int StartAddress, int Length)> list)
+        {
+            foreach (DeviceItem item in items)
+            {
+                try
+                {
+                    foreach (var address in item.Addresses)
+                    {
+                        if (address.StartAddress >= 0)
+                        {
+                            list.Add((item.Name, address.IoType.ToString(), address.StartAddress, address.Length));
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                }
+
+                CollectAssignedAddresses(item.DeviceItems, list);
+            }
+        }
+
         /// <summary>
         /// HMI and GSD devices often carry an empty TypeIdentifier at the queried level -
         /// fall back to the first non-empty TypeIdentifier / OrderNumber / TypeName found

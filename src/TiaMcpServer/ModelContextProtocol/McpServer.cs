@@ -4691,11 +4691,11 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ExportHmiTagTable(softwarePath, tagTableName, exportPath);
+                var file = Portal.ExportHmiTagTable(softwarePath, tagTableName, exportPath);
 
                 return new ResponseExportHmiTagTable
                 {
-                    Message = $"HMI tag table '{tagTableName}' exported from '{softwarePath}' to '{exportPath}'",
+                    Message = $"HMI tag table '{tagTableName}' exported from '{softwarePath}' to '{file}'",
                     Meta = new JsonObject
                     {
                         ["timestamp"] = DateTime.Now,
@@ -4744,11 +4744,11 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ImportHmiTagTable(softwarePath, importPath);
+                var imported = Portal.ImportHmiTagTable(softwarePath, importPath);
 
                 return new ResponseImportHmiTagTable
                 {
-                    Message = $"HMI tag table imported from '{importPath}' to '{softwarePath}'",
+                    Message = $"HMI tag table(s) [{string.Join(", ", imported)}] imported from '{importPath}' to '{softwarePath}'. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
                     Meta = new JsonObject
                     {
                         ["timestamp"] = DateTime.Now,
@@ -4833,8 +4833,25 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetScreenInfo(softwarePath, screenName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var obj = Portal.GetScreenInfo(softwarePath, screenName);
+                var eo = obj as global::Siemens.Engineering.IEngineeringObject;
+                string name = "";
+                int? width = null;
+                int? height = null;
+                if (eo != null)
+                {
+                    try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                    try { width = Convert.ToInt32(eo.GetAttribute("Width")); } catch { }
+                    try { height = Convert.ToInt32(eo.GetAttribute("Height")); } catch { }
+                }
+                return new ResponseScreenInfo
+                {
+                    Name = name,
+                    ScreenType = obj?.GetType().Name,
+                    Width = width,
+                    Height = height,
+                    Attributes = eo != null ? Helper.GetAttributeList(eo) : null
+                };
             }
             catch (TiaMcpServer.Siemens.PortalException pex)
             {
@@ -4869,11 +4886,11 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ExportScreen(softwarePath, screenName, exportPath);
+                var file = Portal.ExportScreen(softwarePath, screenName, exportPath);
 
                 return new ResponseExportScreen
                 {
-                    Message = $"HMI screen '{screenName}' exported from '{softwarePath}' to '{exportPath}'",
+                    Message = $"HMI screen '{screenName}' exported from '{softwarePath}' to '{file}'",
                     Meta = new JsonObject
                     {
                         ["timestamp"] = DateTime.Now,
@@ -4922,11 +4939,11 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ImportScreen(softwarePath, importPath);
+                var imported = Portal.ImportScreen(softwarePath, importPath);
 
                 return new ResponseImportScreen
                 {
-                    Message = $"HMI screen imported from '{importPath}' to '{softwarePath}'",
+                    Message = $"HMI screen(s) [{string.Join(", ", imported)}] imported from '{importPath}' to '{softwarePath}'. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
                     Meta = new JsonObject
                     {
                         ["timestamp"] = DateTime.Now,
@@ -5045,13 +5062,57 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetDiscreteAlarms(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetDiscreteAlarms(softwarePath, regexName);
+                var items = BuildAlarmInfos(list);
+                return new ResponseDiscreteAlarms
+                {
+                    Message = $"Discrete alarms retrieved from '{softwarePath}'. On classic (Basic/Comfort) panels these are attached to HMI tags; create or edit them by re-importing the tag table XML (ExportHmiTagTable -> edit -> ImportHmiTagTable).",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
             }
             catch (Exception ex) when (ex is not McpException)
             {
                 throw new McpException($"Unexpected error retrieving discrete alarms from '{softwarePath}': {ex.Message}", ex, McpErrorCode.InternalError);
             }
+        }
+
+        private static List<ResponseAlarmInfo> BuildAlarmInfos(List<object> list)
+        {
+            var items = new List<ResponseAlarmInfo>();
+            foreach (var obj in list)
+            {
+                if (obj is Dictionary<string, object?> dict)
+                {
+                    var attributes = new List<Attribute>();
+                    foreach (var kv in dict)
+                    {
+                        attributes.Add(new Attribute { Name = kv.Key, Value = kv.Value?.ToString() });
+                    }
+                    items.Add(new ResponseAlarmInfo
+                    {
+                        Name = dict.TryGetValue("Name", out var n) ? n?.ToString() : null,
+                        AlarmClass = dict.TryGetValue("AlarmClass", out var c) ? c?.ToString() : null,
+                        TriggerTag = dict.TryGetValue("TriggerTag", out var t) ? t?.ToString() : null,
+                        AlarmText = dict.TryGetValue("AlarmText", out var x) ? x?.ToString() : null,
+                        Attributes = attributes
+                    });
+                }
+                else if (obj is global::Siemens.Engineering.IEngineeringObject eo)
+                {
+                    string name = "";
+                    string? alarmClass = null;
+                    try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                    try { alarmClass = eo.GetAttribute("AlarmClass")?.ToString(); } catch { }
+                    items.Add(new ResponseAlarmInfo
+                    {
+                        Name = name,
+                        AlarmClass = alarmClass,
+                        Attributes = Helper.GetAttributeList(eo)
+                    });
+                }
+            }
+            return items;
         }
 
         [McpServerTool(Name = "GetAnalogAlarms"), Description("Get a list of analog alarms from the HMI software")]
@@ -5061,8 +5122,14 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetAnalogAlarms(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetAnalogAlarms(softwarePath, regexName);
+                var items = BuildAlarmInfos(list);
+                return new ResponseAnalogAlarms
+                {
+                    Message = $"Analog alarms retrieved from '{softwarePath}'. On classic (Basic/Comfort) panels these are attached to HMI tags; create or edit them by re-importing the tag table XML (ExportHmiTagTable -> edit -> ImportHmiTagTable).",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
             }
             catch (Exception ex) when (ex is not McpException)
             {
@@ -5081,8 +5148,27 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.GetTextLists(softwarePath, regexName);
-                throw new McpException("Unexpected: Portal method did not throw", McpErrorCode.InternalError);
+                var list = Portal.GetTextLists(softwarePath, regexName);
+                var items = new List<ResponseTextListInfo>();
+                foreach (var obj in list)
+                {
+                    if (obj is global::Siemens.Engineering.IEngineeringObject eo)
+                    {
+                        string name = "";
+                        try { name = eo.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                        items.Add(new ResponseTextListInfo
+                        {
+                            Name = name,
+                            Attributes = Helper.GetAttributeList(eo)
+                        });
+                    }
+                }
+                return new ResponseTextLists
+                {
+                    Message = $"HMI text lists retrieved from '{softwarePath}'",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true, ["count"] = items.Count }
+                };
             }
             catch (Exception ex) when (ex is not McpException)
             {
@@ -5098,11 +5184,11 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ExportTextList(softwarePath, textListName, exportPath);
+                var file = Portal.ExportTextList(softwarePath, textListName, exportPath);
 
                 return new ResponseExportTextList
                 {
-                    Message = $"HMI text list '{textListName}' exported from '{softwarePath}' to '{exportPath}'",
+                    Message = $"HMI text list '{textListName}' exported from '{softwarePath}' to '{file}'",
                     Meta = new JsonObject
                     {
                         ["timestamp"] = DateTime.Now,
@@ -5151,11 +5237,11 @@ namespace TiaMcpServer.ModelContextProtocol
         {
             try
             {
-                Portal.ImportTextList(softwarePath, importPath);
+                var imported = Portal.ImportTextList(softwarePath, importPath);
 
                 return new ResponseImportTextList
                 {
-                    Message = $"HMI text list imported from '{importPath}' to '{softwarePath}'",
+                    Message = $"HMI text list(s) [{string.Join(", ", imported)}] imported from '{importPath}' to '{softwarePath}'. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
                     Meta = new JsonObject
                     {
                         ["timestamp"] = DateTime.Now,

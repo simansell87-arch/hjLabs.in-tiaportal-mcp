@@ -5697,14 +5697,129 @@ namespace TiaMcpServer.Siemens
             return list;
         }
 
-        public void ExportHmiTagTable(string softwarePath, string tagTableName, string exportPath)
+        private global::Siemens.Engineering.Hmi.Tag.TagTable? FindHmiTagTable(HmiTarget hmi, string tagTableName, out List<string> available)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            var tables = new List<object>();
+            CollectHmiTagTables(hmi.TagFolder.TagTables, hmi.TagFolder.Folders, tables, "");
+            available = tables.OfType<global::Siemens.Engineering.Hmi.Tag.TagTable>().Select(t => t.Name).ToList();
+            return tables
+                .OfType<global::Siemens.Engineering.Hmi.Tag.TagTable>()
+                .FirstOrDefault(t => t.Name.Equals(tagTableName, StringComparison.OrdinalIgnoreCase));
         }
 
-        public void ImportHmiTagTable(string softwarePath, string importPath)
+        // Resolves an export target: a path ending in .xml is used as the file,
+        // anything else is treated as a directory (created if needed) and the
+        // sanitized object name becomes the filename. Deletes a pre-existing file,
+        // because Openness refuses to overwrite on export.
+        private static string ResolveExportFile(string exportPath, string objectName)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            string file;
+            if (exportPath.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+            {
+                file = exportPath;
+                var dir = Path.GetDirectoryName(file);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+            }
+            else
+            {
+                if (!Directory.Exists(exportPath))
+                {
+                    Directory.CreateDirectory(exportPath);
+                }
+                file = Path.Combine(exportPath, SanitizeFileName(objectName) + ".xml");
+            }
+
+            if (File.Exists(file))
+            {
+                File.Delete(file);
+            }
+
+            return file;
+        }
+
+        public string ExportHmiTagTable(string softwarePath, string tagTableName, string exportPath)
+        {
+            _logger?.LogInformation($"Exporting HMI tag table '{tagTableName}' to '{exportPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var table = FindHmiTagTable(hmi, tagTableName, out var available);
+                if (table == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"HMI tag table '{tagTableName}' not found", available);
+                }
+
+                var file = ResolveExportFile(exportPath, table.Name);
+                table.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                return file;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to export HMI tag table '{tagTableName}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["tagTableName"] = tagTableName;
+                pex.Data["exportPath"] = exportPath;
+                _logger?.LogError(pex, "ExportHmiTagTable failed for {SoftwarePath} {TagTableName} -> {ExportPath}", softwarePath, tagTableName, exportPath);
+                throw pex;
+            }
+        }
+
+        public List<string> ImportHmiTagTable(string softwarePath, string importPath)
+        {
+            _logger?.LogInformation($"Importing HMI tag table from '{importPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var fileInfo = new FileInfo(importPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"Import file not found: {importPath}");
+                }
+
+                var imported = RunWithTimeout(
+                    () => hmi.TagFolder.TagTables.Import(fileInfo, ImportOptions.Override),
+                    60, "ImportHmiTagTable");
+
+                if (imported == null || imported.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import returned no tag tables (check the SimaticML content)");
+                }
+
+                return imported.Select(t => t.Name).ToList();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI tag table from '{importPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["importPath"] = importPath;
+                _logger?.LogError(pex, "ImportHmiTagTable failed for {SoftwarePath} from {ImportPath}", softwarePath, importPath);
+                throw pex;
+            }
         }
 
         #endregion
@@ -5766,24 +5881,110 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        private global::Siemens.Engineering.Hmi.Screen.Screen? FindHmiScreen(HmiTarget hmi, string screenName, out List<string> available)
+        {
+            var screens = new List<object>();
+            CollectScreens(hmi.ScreenFolder.Screens, hmi.ScreenFolder.Folders, screens, "");
+            available = screens.OfType<global::Siemens.Engineering.Hmi.Screen.Screen>().Select(s => s.Name).ToList();
+            return screens
+                .OfType<global::Siemens.Engineering.Hmi.Screen.Screen>()
+                .FirstOrDefault(s => s.Name.Equals(screenName, StringComparison.OrdinalIgnoreCase));
+        }
+
         public object? GetScreenByName(string softwarePath, string screenName)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Getting HMI screen '{screenName}'");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var screen = FindHmiScreen(hmi, screenName, out var available);
+            if (screen == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"HMI screen '{screenName}' not found", available);
+            }
+
+            return screen;
         }
 
-        public void ExportScreen(string softwarePath, string screenName, string exportPath)
+        public string ExportScreen(string softwarePath, string screenName, string exportPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Exporting HMI screen '{screenName}' to '{exportPath}'");
+
+            try
+            {
+                var screen = GetScreenByName(softwarePath, screenName) as global::Siemens.Engineering.Hmi.Screen.Screen;
+
+                var file = ResolveExportFile(exportPath, screen!.Name);
+                screen.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                return file;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to export HMI screen '{screenName}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["screenName"] = screenName;
+                pex.Data["exportPath"] = exportPath;
+                _logger?.LogError(pex, "ExportScreen failed for {SoftwarePath} {ScreenName} -> {ExportPath}", softwarePath, screenName, exportPath);
+                throw pex;
+            }
         }
 
-        public void ImportScreen(string softwarePath, string importPath)
+        public List<string> ImportScreen(string softwarePath, string importPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Importing HMI screen from '{importPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var fileInfo = new FileInfo(importPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"Import file not found: {importPath}");
+                }
+
+                var imported = RunWithTimeout(
+                    () => hmi.ScreenFolder.Screens.Import(fileInfo, ImportOptions.Override),
+                    60, "ImportScreen");
+
+                if (imported == null || imported.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import returned no screens (check the SimaticML content)");
+                }
+
+                return imported.Select(s => s.Name).ToList();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI screen from '{importPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["importPath"] = importPath;
+                _logger?.LogError(pex, "ImportScreen failed for {SoftwarePath} from {ImportPath}", softwarePath, importPath);
+                throw pex;
+            }
         }
 
         public object? GetScreenInfo(string softwarePath, string screenName)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            return GetScreenByName(softwarePath, screenName);
         }
 
         #endregion
@@ -5831,21 +6032,162 @@ namespace TiaMcpServer.Siemens
 
         public void CreateHmiConnection(string softwarePath, string connectionName, string partnerDevicePath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            // The classic (Basic/Comfort) HMI Openness API exposes Connections only for
+            // read and Import - ConnectionComposition has no Create method. Integrated
+            // connections are created in the TIA Portal Devices & networks editor, or by
+            // importing a connection XML exported from a sibling project.
+            throw new PortalException(PortalErrorCode.InvalidState,
+                "TIA Openness cannot create classic HMI connections directly (ConnectionComposition has no Create). " +
+                "Create the connection in TIA Portal under 'Devices & networks > Connections', " +
+                "or export a connection XML from a project that has one and re-import it there.");
         }
 
         #endregion
 
         #region HMI Alarms
 
+        // Classic (Basic/Comfort) panels do not expose alarms as Openness objects -
+        // discrete and analog alarms are attached to HMI tags and ride along in the
+        // tag-table SimaticML. Reading them = export tag tables to temp XML and parse;
+        // creating them = ImportHmiTagTable with the alarm elements included.
+        // Unified panels expose them as first-class compositions on HmiSoftware.
         public List<object> GetDiscreteAlarms(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            return GetHmiAlarms(softwarePath, "DiscreteAlarm", regexName);
         }
 
         public List<object> GetAnalogAlarms(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            return GetHmiAlarms(softwarePath, "AnalogAlarm", regexName);
+        }
+
+        private List<object> GetHmiAlarms(string softwarePath, string alarmKind, string regexName)
+        {
+            _logger?.LogInformation($"Getting HMI {alarmKind}s...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            // Unified HMI: first-class alarm objects
+            var unified = GetHmiSoftware(softwarePath);
+            if (unified != null)
+            {
+                var list = new List<object>();
+                System.Collections.IEnumerable alarms = alarmKind == "DiscreteAlarm"
+                    ? unified.DiscreteAlarms
+                    : (System.Collections.IEnumerable)unified.AnalogAlarms;
+                foreach (IEngineeringObject alarm in alarms)
+                {
+                    string name = "";
+                    try { name = alarm.GetAttribute("Name")?.ToString() ?? ""; } catch { }
+                    if (!string.IsNullOrEmpty(regexName) && !SafeRegexMatch(name, regexName))
+                    {
+                        continue;
+                    }
+                    list.Add(alarm);
+                }
+                return list;
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No HMI software found at path '{softwarePath}'");
+            }
+
+            // Classic HMI: harvest alarms from the tag-table SimaticML
+            var result = new List<object>();
+            var tables = new List<object>();
+            CollectHmiTagTables(hmi.TagFolder.TagTables, hmi.TagFolder.Folders, tables, "");
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "tia_hmialarms_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                foreach (var t in tables.OfType<global::Siemens.Engineering.Hmi.Tag.TagTable>())
+                {
+                    var file = Path.Combine(tempDir, SanitizeFileName(t.Name) + ".xml");
+                    try
+                    {
+                        t.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, $"Skipping tag table '{t.Name}' (export failed)");
+                        continue;
+                    }
+
+                    var doc = XDocument.Load(file);
+                    foreach (var alarmEl in doc.Descendants().Where(e => e.Name.LocalName.EndsWith(alarmKind, StringComparison.Ordinal)))
+                    {
+                        var info = new Dictionary<string, object?>
+                        {
+                            ["TagTable"] = t.Name,
+                            ["AlarmKind"] = alarmKind
+                        };
+
+                        // trigger tag = the enclosing Hmi.Tag.Tag object's Name
+                        var tagEl = alarmEl.Ancestors().FirstOrDefault(a => a.Name.LocalName.EndsWith(".Tag", StringComparison.Ordinal));
+                        var tagName = tagEl?.Elements().FirstOrDefault(e => e.Name.LocalName == "AttributeList")?
+                            .Elements().FirstOrDefault(e => e.Name.LocalName == "Name")?.Value;
+                        info["TriggerTag"] = tagName;
+
+                        var attrList = alarmEl.Elements().FirstOrDefault(e => e.Name.LocalName == "AttributeList");
+                        if (attrList != null)
+                        {
+                            foreach (var attr in attrList.Elements())
+                            {
+                                if (!attr.HasElements)
+                                {
+                                    info[attr.Name.LocalName] = attr.Value;
+                                }
+                            }
+                        }
+
+                        // multilingual alarm text(s)
+                        var texts = alarmEl.Descendants()
+                            .Where(e => e.Name.LocalName == "MultilingualTextItem")
+                            .Select(item => item.Descendants().FirstOrDefault(e => e.Name.LocalName == "Text")?.Value)
+                            .Where(v => !string.IsNullOrEmpty(v))
+                            .Distinct()
+                            .ToList();
+                        if (texts.Count > 0)
+                        {
+                            info["AlarmText"] = string.Join(" | ", texts);
+                        }
+
+                        var alarmName = info.TryGetValue("Name", out var n) ? n?.ToString() ?? "" : "";
+                        if (!string.IsNullOrEmpty(regexName) &&
+                            !SafeRegexMatch(alarmName, regexName) &&
+                            !SafeRegexMatch(tagName ?? "", regexName))
+                        {
+                            continue;
+                        }
+
+                        result.Add(info);
+                    }
+                }
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+
+            return result;
+        }
+
+        private static bool SafeRegexMatch(string input, string pattern)
+        {
+            try
+            {
+                return Regex.IsMatch(input, pattern, RegexOptions.IgnoreCase);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         #endregion
@@ -5854,17 +6196,133 @@ namespace TiaMcpServer.Siemens
 
         public List<object> GetTextLists(string softwarePath, string regexName = "")
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation("Getting HMI text lists...");
+
+            if (IsProjectNull())
+            {
+                return [];
+            }
+
+            var hmi = GetHmiTarget(softwarePath);
+            if (hmi == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+            }
+
+            var list = new List<object>();
+            if (hmi.TextLists != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.TextGraphicList.TextList textList in hmi.TextLists)
+                {
+                    if (!string.IsNullOrEmpty(regexName) && !SafeRegexMatch(textList.Name, regexName))
+                    {
+                        continue;
+                    }
+                    list.Add(textList);
+                }
+            }
+
+            return list;
         }
 
-        public void ExportTextList(string softwarePath, string textListName, string exportPath)
+        private global::Siemens.Engineering.Hmi.TextGraphicList.TextList? FindTextList(HmiTarget hmi, string textListName, out List<string> available)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            available = new List<string>();
+            global::Siemens.Engineering.Hmi.TextGraphicList.TextList? found = null;
+            if (hmi.TextLists != null)
+            {
+                foreach (global::Siemens.Engineering.Hmi.TextGraphicList.TextList textList in hmi.TextLists)
+                {
+                    available.Add(textList.Name);
+                    if (textList.Name.Equals(textListName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = textList;
+                    }
+                }
+            }
+            return found;
         }
 
-        public void ImportTextList(string softwarePath, string importPath)
+        public string ExportTextList(string softwarePath, string textListName, string exportPath)
         {
-            throw new PortalException(PortalErrorCode.InvalidState, "This feature requires API types not available in the current TIA Portal Openness version");
+            _logger?.LogInformation($"Exporting HMI text list '{textListName}' to '{exportPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var textList = FindTextList(hmi, textListName, out var available);
+                if (textList == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"HMI text list '{textListName}' not found", available);
+                }
+
+                var file = ResolveExportFile(exportPath, textList.Name);
+                textList.Export(new FileInfo(file), ExportOptions.WithDefaults);
+                return file;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to export HMI text list '{textListName}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["textListName"] = textListName;
+                pex.Data["exportPath"] = exportPath;
+                _logger?.LogError(pex, "ExportTextList failed for {SoftwarePath} {TextListName} -> {ExportPath}", softwarePath, textListName, exportPath);
+                throw pex;
+            }
+        }
+
+        public List<string> ImportTextList(string softwarePath, string importPath)
+        {
+            _logger?.LogInformation($"Importing HMI text list from '{importPath}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var hmi = GetHmiTarget(softwarePath);
+                if (hmi == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"No classic HMI target found at path '{softwarePath}'");
+                }
+
+                var fileInfo = new FileInfo(importPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, $"Import file not found: {importPath}");
+                }
+
+                var imported = RunWithTimeout(
+                    () => hmi.TextLists.Import(fileInfo, ImportOptions.Override),
+                    60, "ImportTextList");
+
+                if (imported == null || imported.Count == 0)
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "Import returned no text lists (check the SimaticML content)");
+                }
+
+                return imported.Select(t => t.Name).ToList();
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.ExportFailed, $"Failed to import HMI text list from '{importPath}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["importPath"] = importPath;
+                _logger?.LogError(pex, "ImportTextList failed for {SoftwarePath} from {ImportPath}", softwarePath, importPath);
+                throw pex;
+            }
         }
 
         #endregion

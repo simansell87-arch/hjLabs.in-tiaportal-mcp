@@ -313,24 +313,23 @@ namespace TiaMcpServer.ModelContextProtocol
                 }
                 else
                 {
-                    if (Portal.SaveAsProject(newProjectPath))
+                    var targetPath = Portal.SaveAsProject(newProjectPath);
+
+                    return new ResponseSaveAsProject
                     {
-                        return new ResponseSaveAsProject
+                        Message = $"Local project saved as '{targetPath}'",
+                        Meta = new JsonObject
                         {
-                            Message = $"Local project saved as '{newProjectPath}'",
-                            Meta = new JsonObject
-                            {
-                                ["timestamp"] = DateTime.Now,
-                                ["success"] = true
-                            }
-                        };
-                    }
-                    else
-                    {
-                        throw new McpException($"Failed saving local project as '{newProjectPath}'", McpErrorCode.InternalError);
-                    }
+                            ["timestamp"] = DateTime.Now,
+                            ["success"] = true
+                        }
+                    };
                 }
 
+            }
+            catch (PortalException pex)
+            {
+                throw new McpException(pex.Message, pex, McpErrorCode.InvalidParams);
             }
             catch (Exception ex) when (ex is not McpException)
             {

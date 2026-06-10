@@ -355,20 +355,61 @@ namespace TiaMcpServer.Siemens
             return true;
         }
 
-        public bool SaveAsProject(string path)
+        public string SaveAsProject(string path)
         {
             _logger?.LogInformation($"Saving project as: {path}");
 
             if (IsProjectNull())
             {
-                return false;
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
             }
 
-            var di = new DirectoryInfo(path);
+            var project = _project as Project;
+            if (project == null)
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "SaveAs requires a local project (not a multiuser session)");
+            }
 
-            (_project as Project)?.SaveAs(di);
+            // SaveAs needs a new/empty project FOLDER. If the caller passed an existing,
+            // non-empty directory (a parent like '...\SaudiArabia'), derive the project
+            // folder from the current project name inside it.
+            var targetPath = path;
+            try
+            {
+                if (Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any())
+                {
+                    targetPath = Path.Combine(path, project.Name);
+                }
+            }
+            catch (Exception)
+            {
+                // fall through with the caller's path; SaveAs reports the real problem
+            }
 
-            return true;
+            try
+            {
+                project.SaveAs(new DirectoryInfo(targetPath));
+            }
+            catch (Exception ex)
+            {
+                throw new PortalException(PortalErrorCode.InvalidParams,
+                    $"SaveAs to '{targetPath}' failed: {ex.Message}. " +
+                    "Provide a NEW or EMPTY target project folder (e.g. '<parent>\\<NewProjectName>'); " +
+                    "a parent directory is also accepted and the current project name is appended.", null, ex);
+            }
+
+            // the open project handle changes after SaveAs - re-acquire it
+            try
+            {
+                _session = _portal?.LocalSessions.FirstOrDefault();
+                _project = _session != null ? _session.Project : _portal?.Projects.FirstOrDefault();
+            }
+            catch (Exception)
+            {
+                TryReattach();
+            }
+
+            return targetPath;
         }
 
         public bool CloseProject()
@@ -3983,9 +4024,91 @@ namespace TiaMcpServer.Siemens
 
         #region private helper
 
-        private bool IsPortalNull()
+        // Re-attaches to a RUNNING TIA Portal process and re-acquires the open
+        // project/session. Never starts a new TIA instance (unlike ConnectPortal).
+        // Used to transparently recover from disposed handles after the user
+        // restarted TIA, closed/re-opened the project, or after SaveAs.
+        private bool TryReattach()
+        {
+            try
+            {
+                _project = null;
+                _session = null;
+                _portal = null;
+
+                var processes = TiaPortal.GetProcesses();
+                if (!processes.Any())
+                {
+                    return false;
+                }
+
+                _portal = processes.First().Attach();
+
+                if (_portal.LocalSessions.Any())
+                {
+                    _session = _portal.LocalSessions.First();
+                    _project = _session.Project;
+                }
+                else if (_portal.Projects.Any())
+                {
+                    _project = _portal.Projects.First();
+                }
+
+                _logger?.LogInformation("Re-attached to running TIA Portal (project: {Project})", _project?.Name ?? "-");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Re-attach to TIA Portal failed");
+                _portal = null;
+                _project = null;
+                _session = null;
+                return false;
+            }
+        }
+
+        private bool IsPortalHealthy()
         {
             if (_portal == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                // touching a disposed/orphaned portal object throws
+                var _ = _portal.GetCurrentProcess();
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private bool IsProjectHealthy()
+        {
+            if (_project == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                // reading an attribute of a closed project throws
+                // 'Access to a disposed object ... is not possible'
+                var _ = _project.Name;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private bool IsPortalNull()
+        {
+            if (!IsPortalHealthy() && !TryReattach())
             {
                 _logger?.LogWarning("No TIA portal available.");
 
@@ -3997,7 +4120,30 @@ namespace TiaMcpServer.Siemens
 
         private bool IsProjectNull()
         {
-            if (_project == null)
+            if (IsProjectHealthy())
+            {
+                return false;
+            }
+
+            // stale or missing handle: re-acquire from the (possibly re-attached) portal
+            if (!IsPortalHealthy())
+            {
+                TryReattach();
+            }
+            else
+            {
+                try
+                {
+                    _session = _portal!.LocalSessions.FirstOrDefault();
+                    _project = _session != null ? _session.Project : _portal.Projects.FirstOrDefault();
+                }
+                catch (Exception)
+                {
+                    TryReattach();
+                }
+            }
+
+            if (!IsProjectHealthy())
             {
                 _logger?.LogWarning("No TIA project available.");
 

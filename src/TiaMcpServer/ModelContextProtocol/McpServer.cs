@@ -439,6 +439,17 @@ namespace TiaMcpServer.ModelContextProtocol
                 {
                     var attributes = Helper.GetAttributeList(device);
 
+                    // HMI/GSD devices often have an empty TypeIdentifier - surface the resolved one
+                    var typeId = attributes.FirstOrDefault(a => a.Name == "TypeIdentifier")?.Value?.ToString();
+                    if (string.IsNullOrEmpty(typeId))
+                    {
+                        var resolved = Portal.ResolveTypeIdentifier(device);
+                        if (!string.IsNullOrEmpty(resolved))
+                        {
+                            attributes.Add(new Attribute { Name = "ResolvedTypeIdentifier", Value = resolved, AccessMode = "Read" });
+                        }
+                    }
+
                     return new ResponseDeviceInfo
                     {
                         Message = $"Device info retrieved from '{devicePath}'",
@@ -474,6 +485,17 @@ namespace TiaMcpServer.ModelContextProtocol
                 if (deviceItem != null)
                 {
                     var attributes = Helper.GetAttributeList(deviceItem);
+
+                    // HMI runtimes/GSD modules often have an empty TypeIdentifier - surface the resolved one
+                    var typeId = attributes.FirstOrDefault(a => a.Name == "TypeIdentifier")?.Value?.ToString();
+                    if (string.IsNullOrEmpty(typeId))
+                    {
+                        var resolved = Portal.ResolveTypeIdentifier(deviceItem);
+                        if (!string.IsNullOrEmpty(resolved))
+                        {
+                            attributes.Add(new Attribute { Name = "ResolvedTypeIdentifier", Value = resolved, AccessMode = "Read" });
+                        }
+                    }
 
                     return new ResponseDeviceItemInfo
                     {
@@ -1569,16 +1591,32 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
-        [McpServerTool(Name = "GetBlocksWithHierarchy"), Description("Get a list of all blocks with their group hierarchy from the plc software.")]
+        [McpServerTool(Name = "GetBlocksWithHierarchy"), Description("Get a list of all blocks with their group hierarchy from the plc software. Use summary=true on large programs to keep the response bounded.")]
         public static ResponseBlocksWithHierarchy GetBlocksWithHierarchy(
-        [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath)
+        [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+        [Description("summary: when true, return only group structure + block names/types/languages (no attribute lists) - bounded output for large programs")] bool summary = false,
+        [Description("regexName: optional name or regular expression to filter the blocks")] string regexName = "",
+        [Description("maxDepth: maximum group nesting depth to descend into (0 = unlimited)")] int maxDepth = 0)
         {
             try
             {
+                Regex? nameFilter = null;
+                if (!string.IsNullOrWhiteSpace(regexName))
+                {
+                    try
+                    {
+                        nameFilter = new Regex(regexName, RegexOptions.IgnoreCase);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new McpException($"Invalid regexName '{regexName}': {ex.Message}", McpErrorCode.InvalidParams);
+                    }
+                }
+
                 var rootGroup = Portal.GetBlockRootGroup(softwarePath);
                 if (rootGroup != null)
                 {
-                    var hierarchy = Helper.BuildBlockHierarchy(rootGroup);
+                    var hierarchy = Helper.BuildBlockHierarchy(rootGroup, summary, nameFilter, maxDepth);
                     return new ResponseBlocksWithHierarchy
                     {
                         Message = $"Block hierarchy retrieved from '{softwarePath}'",
@@ -1586,7 +1624,8 @@ namespace TiaMcpServer.ModelContextProtocol
                         Meta = new JsonObject
                         {
                             ["timestamp"] = DateTime.Now,
-                            ["success"] = true
+                            ["success"] = true,
+                            ["summary"] = summary
                         }
                     };
                 }

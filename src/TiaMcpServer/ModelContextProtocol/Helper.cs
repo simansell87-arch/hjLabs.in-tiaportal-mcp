@@ -85,7 +85,7 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
-        public static BlockGroupInfo BuildBlockHierarchy(PlcBlockGroup group)
+        public static BlockGroupInfo BuildBlockHierarchy(PlcBlockGroup group, bool summary = false, System.Text.RegularExpressions.Regex? nameFilter = null, int maxDepth = 0, int currentDepth = 0)
         {
             var groupInfo = new BlockGroupInfo
             {
@@ -95,28 +95,50 @@ namespace TiaMcpServer.ModelContextProtocol
             var blockList = new List<ResponseBlockInfo>();
             foreach (var block in group.Blocks)
             {
-                var attributes = Helper.GetAttributeList(block);
-                blockList.Add(new ResponseBlockInfo
+                if (nameFilter != null && !nameFilter.IsMatch(block.Name))
                 {
-                    Name = block.Name,
-                    TypeName = block.GetType().Name,
-                    Namespace = block.Namespace,
-                    ProgrammingLanguage = Enum.GetName(typeof(ProgrammingLanguage), block.ProgrammingLanguage),
-                    MemoryLayout = Enum.GetName(typeof(MemoryLayout), block.MemoryLayout),
-                    IsConsistent = block.IsConsistent,
-                    HeaderName = block.HeaderName,
-                    ModifiedDate = block.ModifiedDate,
-                    IsKnowHowProtected = block.IsKnowHowProtected,
-                    Attributes = attributes,
-                    Description = block.ToString()
-                });
+                    continue;
+                }
+
+                if (summary)
+                {
+                    // bounded output: names + the few fields needed to navigate
+                    blockList.Add(new ResponseBlockInfo
+                    {
+                        Name = block.Name,
+                        TypeName = block.GetType().Name,
+                        ProgrammingLanguage = Enum.GetName(typeof(ProgrammingLanguage), block.ProgrammingLanguage),
+                        IsConsistent = block.IsConsistent
+                    });
+                }
+                else
+                {
+                    var attributes = Helper.GetAttributeList(block);
+                    blockList.Add(new ResponseBlockInfo
+                    {
+                        Name = block.Name,
+                        TypeName = block.GetType().Name,
+                        Namespace = block.Namespace,
+                        ProgrammingLanguage = Enum.GetName(typeof(ProgrammingLanguage), block.ProgrammingLanguage),
+                        MemoryLayout = Enum.GetName(typeof(MemoryLayout), block.MemoryLayout),
+                        IsConsistent = block.IsConsistent,
+                        HeaderName = block.HeaderName,
+                        ModifiedDate = block.ModifiedDate,
+                        IsKnowHowProtected = block.IsKnowHowProtected,
+                        Attributes = attributes,
+                        Description = block.ToString()
+                    });
+                }
             }
             groupInfo.Blocks = blockList;
 
             var groupList = new List<BlockGroupInfo>();
-            foreach (var subGroup in group.Groups)
+            if (maxDepth <= 0 || currentDepth < maxDepth)
             {
-                groupList.Add(BuildBlockHierarchy(subGroup));
+                foreach (var subGroup in group.Groups)
+                {
+                    groupList.Add(BuildBlockHierarchy(subGroup, summary, nameFilter, maxDepth, currentDepth + 1));
+                }
             }
             groupInfo.Groups = groupList;
 

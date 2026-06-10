@@ -968,6 +968,66 @@ namespace TiaMcpServer.Siemens
         }
 
         /// <summary>
+        /// HMI and GSD devices often carry an empty TypeIdentifier at the queried level -
+        /// fall back to the first non-empty TypeIdentifier / OrderNumber / TypeName found
+        /// on the object itself or (breadth-first) its device items, so the hardware
+        /// model is discoverable from the project.
+        /// </summary>
+        public string ResolveTypeIdentifier(HardwareObject hardwareObject)
+        {
+            static string Probe(IEngineeringObject obj)
+            {
+                foreach (var attr in new[] { "TypeIdentifier", "OrderNumber", "TypeName" })
+                {
+                    try
+                    {
+                        var value = obj.GetAttribute(attr)?.ToString();
+                        if (!string.IsNullOrEmpty(value))
+                        {
+                            return value;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                return "";
+            }
+
+            var own = Probe(hardwareObject);
+            if (!string.IsNullOrEmpty(own))
+            {
+                return own;
+            }
+
+            var queue = new Queue<DeviceItem>();
+            var items = (hardwareObject as Device)?.DeviceItems ?? (hardwareObject as DeviceItem)?.DeviceItems;
+            if (items != null)
+            {
+                foreach (DeviceItem item in items)
+                {
+                    queue.Enqueue(item);
+                }
+            }
+
+            while (queue.Count > 0)
+            {
+                var item = queue.Dequeue();
+                var value = Probe(item);
+                if (!string.IsNullOrEmpty(value))
+                {
+                    return value;
+                }
+                foreach (DeviceItem sub in item.DeviceItems)
+                {
+                    queue.Enqueue(sub);
+                }
+            }
+
+            return "";
+        }
+
+        /// <summary>
         /// Renders the device-item hierarchy with the exact path segments the other
         /// device tools resolve, so GSD/ungrouped device internals are discoverable.
         /// </summary>

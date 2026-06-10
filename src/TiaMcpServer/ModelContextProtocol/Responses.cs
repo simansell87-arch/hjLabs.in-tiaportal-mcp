@@ -247,6 +247,24 @@ namespace TiaMcpServer.ModelContextProtocol
     {
     }
 
+    public class ResponseRename : ResponseMessage
+    {
+        public string? OldName { get; set; }
+        public string? NewName { get; set; }
+    }
+
+    public class ResponseBulkTagResult
+    {
+        public string? Name { get; set; }
+        public bool Success { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public class ResponseBulkCreateTags : ResponseMessage
+    {
+        public IEnumerable<ResponseBulkTagResult>? Items { get; set; }
+    }
+
     public class ResponseWatchTableInfo : ResponseAttributes
     {
         public string? Name { get; set; }

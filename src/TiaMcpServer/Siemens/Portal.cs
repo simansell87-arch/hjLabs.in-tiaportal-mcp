@@ -4144,6 +4144,188 @@ namespace TiaMcpServer.Siemens
             }
         }
 
+        private PlcTag FindTagInTable(string softwarePath, string tagTableName, string tagName)
+        {
+            var table = GetTagTable(softwarePath, tagTableName);
+            if (table == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"Tag table '{tagTableName}' not found");
+            }
+
+            var tag = table.Tags.Cast<PlcTag>().FirstOrDefault(t => t.Name.Equals(tagName, StringComparison.OrdinalIgnoreCase));
+            if (tag == null)
+            {
+                var candidates = table.Tags.Cast<PlcTag>().Select(t => t.Name).ToList();
+                throw new PortalException(PortalErrorCode.NotFound, $"Tag '{tagName}' not found in table '{tagTableName}'", candidates);
+            }
+
+            return tag;
+        }
+
+        /// <summary>
+        /// Renames a tag in place, keeping its address/data type/comment. MUTATES the project.
+        /// </summary>
+        public PlcTag RenameTag(string softwarePath, string tagTableName, string tagName, string newName)
+        {
+            _logger?.LogInformation($"Renaming tag '{tagName}' to '{newName}' in table '{tagTableName}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                if (string.IsNullOrWhiteSpace(newName))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "newName cannot be empty");
+                }
+
+                var tag = FindTagInTable(softwarePath, tagTableName, tagName);
+                tag.SetAttribute("Name", newName);
+                return tag;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to rename tag '{tagName}' to '{newName}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["tagTableName"] = tagTableName;
+                pex.Data["tagName"] = tagName;
+                pex.Data["newName"] = newName;
+                _logger?.LogError(pex, "RenameTag failed for {TagName} -> {NewName}", tagName, newName);
+                throw pex;
+            }
+        }
+
+        /// <summary>
+        /// Updates a tag's comment (and optionally address/data type). MUTATES the project.
+        /// </summary>
+        public PlcTag UpdateTag(string softwarePath, string tagTableName, string tagName, string? comment = null, string? logicalAddress = null, string? dataType = null)
+        {
+            _logger?.LogInformation($"Updating tag '{tagName}' in table '{tagTableName}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                var tag = FindTagInTable(softwarePath, tagTableName, tagName);
+
+                if (logicalAddress != null)
+                {
+                    tag.SetAttribute("LogicalAddress", logicalAddress);
+                }
+                if (dataType != null)
+                {
+                    tag.SetAttribute("DataTypeName", dataType);
+                }
+                if (comment != null)
+                {
+                    tag.Comment.Items[0].Text = comment;
+                }
+
+                return tag;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams, $"Failed to update tag '{tagName}'", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["tagTableName"] = tagTableName;
+                pex.Data["tagName"] = tagName;
+                _logger?.LogError(pex, "UpdateTag failed for {TagName}", tagName);
+                throw pex;
+            }
+        }
+
+        /// <summary>
+        /// Creates many tags in one call (one table). Continues past per-tag failures and
+        /// reports each result. MUTATES the project.
+        /// </summary>
+        public List<(string Name, bool Success, string Error)> BulkCreateTags(
+            string softwarePath, string tagTableName,
+            List<(string Name, string DataType, string LogicalAddress, string Comment)> tags)
+        {
+            _logger?.LogInformation($"Bulk-creating {tags.Count} tags in table '{tagTableName}'");
+
+            if (IsProjectNull())
+            {
+                throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+            }
+
+            var table = GetTagTable(softwarePath, tagTableName);
+            if (table == null)
+            {
+                throw new PortalException(PortalErrorCode.NotFound, $"Tag table '{tagTableName}' not found");
+            }
+
+            var results = new List<(string Name, bool Success, string Error)>();
+            foreach (var t in tags)
+            {
+                try
+                {
+                    var tag = RunWithTimeout(() => table.Tags.Create(t.Name, t.DataType, t.LogicalAddress), 30, $"CreateTag '{t.Name}'");
+                    if (tag != null && !string.IsNullOrEmpty(t.Comment))
+                    {
+                        tag.Comment.Items[0].Text = t.Comment;
+                    }
+                    results.Add((t.Name, true, ""));
+                }
+                catch (Exception ex)
+                {
+                    results.Add((t.Name, false, ex.Message));
+                }
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Renames a block or UDT in place via SetAttribute("Name"). MUTATES the project.
+        /// </summary>
+        public string RenameBlockOrType(string softwarePath, string objectPath, string newName, bool isType)
+        {
+            _logger?.LogInformation($"Renaming {(isType ? "type" : "block")} '{objectPath}' to '{newName}'");
+
+            try
+            {
+                if (IsProjectNull())
+                {
+                    throw new PortalException(PortalErrorCode.InvalidState, "No project is open in TIA Portal");
+                }
+
+                if (string.IsNullOrWhiteSpace(newName))
+                {
+                    throw new PortalException(PortalErrorCode.InvalidParams, "newName cannot be empty");
+                }
+
+                IEngineeringObject? obj = isType
+                    ? GetType(softwarePath, objectPath)
+                    : (IEngineeringObject?)GetBlock(softwarePath, objectPath);
+
+                if (obj == null)
+                {
+                    throw new PortalException(PortalErrorCode.NotFound, $"{(isType ? "Type" : "Block")} '{objectPath}' not found");
+                }
+
+                var oldName = obj.GetAttribute("Name")?.ToString() ?? objectPath;
+                obj.SetAttribute("Name", newName);
+                return oldName;
+            }
+            catch (Exception ex)
+            {
+                var pex = ex as PortalException ?? new PortalException(PortalErrorCode.InvalidParams,
+                    $"Failed to rename '{objectPath}' to '{newName}': {ex.Message}. " +
+                    "Note: know-how-protected or inconsistent objects, and names referenced by other blocks, may refuse the rename.", null, ex);
+                pex.Data["softwarePath"] = softwarePath;
+                pex.Data["objectPath"] = objectPath;
+                pex.Data["newName"] = newName;
+                _logger?.LogError(pex, "Rename failed for {ObjectPath} -> {NewName}", objectPath, newName);
+                throw pex;
+            }
+        }
+
         #endregion
 
         #region watch/force tables

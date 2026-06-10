@@ -3632,6 +3632,188 @@ namespace TiaMcpServer.ModelContextProtocol
             }
         }
 
+        [McpServerTool(Name = "RenameTag"), Description("Rename a PLC tag in place, keeping its address/data type/comment. MUTATES the project (does not save).")]
+        public static ResponseRename RenameTag(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("tagTableName: name of the tag table containing the tag")] string tagTableName,
+            [Description("tagName: current name of the tag")] string tagName,
+            [Description("newName: new name for the tag")] string newName)
+        {
+            try
+            {
+                Portal.RunWithTimeout(() => Portal.RenameTag(softwarePath, tagTableName, tagName, newName), 30, "RenameTag");
+
+                return new ResponseRename
+                {
+                    Message = $"Tag '{tagName}' renamed to '{newName}' in table '{tagTableName}'",
+                    OldName = tagName,
+                    NewName = newName,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error renaming tag '{tagName}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "UpdateTag"), Description("Update a PLC tag's comment, address and/or data type in place. Only the provided fields change. MUTATES the project (does not save).")]
+        public static ResponseCreateTag UpdateTag(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("tagTableName: name of the tag table containing the tag")] string tagTableName,
+            [Description("tagName: name of the tag to update")] string tagName,
+            [Description("comment: new comment (omit to keep)")] string? comment = null,
+            [Description("logicalAddress: new address like '%I10.0' (omit to keep)")] string? logicalAddress = null,
+            [Description("dataType: new data type like 'Bool' (omit to keep)")] string? dataType = null)
+        {
+            try
+            {
+                var tag = Portal.RunWithTimeout(() => Portal.UpdateTag(softwarePath, tagTableName, tagName, comment, logicalAddress, dataType), 30, "UpdateTag");
+
+                return new ResponseCreateTag
+                {
+                    Message = $"Tag '{tagName}' updated in table '{tagTableName}'",
+                    Tag = new ResponseTagInfo
+                    {
+                        Name = tag.Name,
+                        DataTypeName = tag.DataTypeName,
+                        LogicalAddress = tag.LogicalAddress,
+                        Comment = comment
+                    },
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                var msg = pex.Message;
+                if (pex.Candidates != null)
+                {
+                    msg += $" Available: {string.Join(", ", pex.Candidates.Take(10))}";
+                }
+                throw new McpException(msg, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error updating tag '{tagName}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "BulkCreateTags"), Description("Create many PLC tags in one tag table in a single call. Continues past per-tag failures and reports each result. MUTATES the project (does not save).")]
+        public static ResponseBulkCreateTags BulkCreateTags(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("tagTableName: name of the tag table to create the tags in")] string tagTableName,
+            [Description("tagsJson: JSON array of tags, e.g. [{\"name\":\"Motor1_Run\",\"dataType\":\"Bool\",\"address\":\"%Q10.0\",\"comment\":\"optional\"}]")] string tagsJson)
+        {
+            List<(string Name, string DataType, string LogicalAddress, string Comment)> tags;
+            try
+            {
+                var arr = JsonNode.Parse(tagsJson) as JsonArray
+                    ?? throw new FormatException("tagsJson must be a JSON array");
+                tags = arr.Select(n => (
+                    Name: n?["name"]?.GetValue<string>() ?? throw new FormatException("each tag needs a 'name'"),
+                    DataType: n?["dataType"]?.GetValue<string>() ?? throw new FormatException("each tag needs a 'dataType'"),
+                    LogicalAddress: n?["address"]?.GetValue<string>() ?? throw new FormatException("each tag needs an 'address'"),
+                    Comment: n?["comment"]?.GetValue<string>() ?? ""
+                )).ToList();
+            }
+            catch (Exception ex)
+            {
+                throw new McpException($"Invalid tagsJson: {ex.Message}", McpErrorCode.InvalidParams);
+            }
+
+            try
+            {
+                var results = Portal.BulkCreateTags(softwarePath, tagTableName, tags);
+                var created = results.Count(r => r.Success);
+                var items = results.Select(r => new ResponseBulkTagResult
+                {
+                    Name = r.Name,
+                    Success = r.Success,
+                    Error = string.IsNullOrEmpty(r.Error) ? null : r.Error
+                }).ToList();
+
+                return new ResponseBulkCreateTags
+                {
+                    Message = $"{created}/{results.Count} tag(s) created in '{tagTableName}'. NOTE: the project is modified but NOT saved - call SaveProject to persist.",
+                    Items = items,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = created == results.Count, ["created"] = created, ["failed"] = results.Count - created }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error bulk-creating tags in '{tagTableName}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "RenameBlock"), Description("Rename a block in place via SetAttribute('Name'). MUTATES the project (does not save).")]
+        public static ResponseRename RenameBlock(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("blockPath: full path to the block, e.g. 'Group/Subgroup/Name'")] string blockPath,
+            [Description("newName: new name for the block")] string newName)
+        {
+            try
+            {
+                var oldName = Portal.RunWithTimeout(() => Portal.RenameBlockOrType(softwarePath, blockPath, newName, false), 30, "RenameBlock");
+
+                return new ResponseRename
+                {
+                    Message = $"Block '{oldName}' renamed to '{newName}'",
+                    OldName = oldName,
+                    NewName = newName,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error renaming block '{blockPath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
+        [McpServerTool(Name = "RenameType"), Description("Rename a UDT/type in place via SetAttribute('Name'). MUTATES the project (does not save).")]
+        public static ResponseRename RenameType(
+            [Description("softwarePath: defines the path in the project structure to the plc software")] string softwarePath,
+            [Description("typePath: full path to the type, e.g. 'Group/Name'")] string typePath,
+            [Description("newName: new name for the type")] string newName)
+        {
+            try
+            {
+                var oldName = Portal.RunWithTimeout(() => Portal.RenameBlockOrType(softwarePath, typePath, newName, true), 30, "RenameType");
+
+                return new ResponseRename
+                {
+                    Message = $"Type '{oldName}' renamed to '{newName}'",
+                    OldName = oldName,
+                    NewName = newName,
+                    Meta = new JsonObject { ["timestamp"] = DateTime.Now, ["success"] = true }
+                };
+            }
+            catch (TiaMcpServer.Siemens.PortalException pex)
+            {
+                throw new McpException(pex.Message, McpErrorCode.InvalidParams);
+            }
+            catch (Exception ex) when (ex is not McpException)
+            {
+                throw new McpException($"Unexpected error renaming type '{typePath}': {ex.Message}", ex, McpErrorCode.InternalError);
+            }
+        }
+
         #endregion
 
         #region watch/force tables

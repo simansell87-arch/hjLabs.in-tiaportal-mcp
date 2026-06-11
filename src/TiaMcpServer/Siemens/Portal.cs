@@ -2194,21 +2194,59 @@ namespace TiaMcpServer.Siemens
 
         private string ReconstructAccess(XElement access)
         {
-            // Literal / typed constant
-            var constant = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Constant")
-                ?? access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Constant");
+            // The Access_T payload is one DIRECT child (xs:choice). Dispatch on it
+            // before any descendant fallback - otherwise a call's first parameter
+            // literal/symbol would be returned instead of the call itself.
+            foreach (var child in access.Elements())
+            {
+                switch (child.Name.LocalName)
+                {
+                    case "Constant":
+                        {
+                            var val = child.Descendants().FirstOrDefault(e => e.Name.LocalName == "ConstantValue")?.Value;
+                            if (!string.IsNullOrEmpty(val)) return val;
+                            var cname = child.Attribute("Name")?.Value;
+                            if (!string.IsNullOrEmpty(cname)) return cname;
+                            break;
+                        }
+                    case "Symbol":
+                        {
+                            var parts = child.Elements()
+                                .Where(e => e.Name.LocalName == "Component")
+                                .Select(ReconstructComponent)
+                                .Where(s => s.Length > 0)
+                                .ToList();
+                            if (parts.Count > 0) return string.Join(".", parts);
+                            break;
+                        }
+                    case "CallInfo":
+                        // block call (Access Scope="Call"): instance + parameters
+                        return ReconstructCallInfo(child, isInstruction: false);
+                    case "Instruction":
+                        return ReconstructCallInfo(child, isInstruction: true);
+                    case "Expression":
+                        {
+                            var sb = new StringBuilder();
+                            AppendStTokens(child, sb);
+                            return sb.ToString();
+                        }
+                    case "PredefinedVariable":
+                        return child.Attribute("Name")?.Value ?? "";
+                    case "Label":
+                        return child.Attribute("Name")?.Value ?? "";
+                }
+            }
+
+            // Fallback for nested shapes (e.g. LAD FlgNet variants): first constant
+            // or symbol found anywhere below.
+            var constant = access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Constant");
             if (constant != null)
             {
                 var val = constant.Descendants().FirstOrDefault(e => e.Name.LocalName == "ConstantValue")?.Value;
                 if (!string.IsNullOrEmpty(val)) return val;
-                // constant name (named constant access)
-                var cname = constant.Attribute("Name")?.Value;
-                if (!string.IsNullOrEmpty(cname)) return cname;
             }
 
-            // Symbolic operand: join component names with '.', keeping array indices
-            var symbol = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Symbol")
-                ?? access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Symbol");
+            var symbol = access.Descendants().FirstOrDefault(e => e.Name.LocalName == "Symbol");
             if (symbol != null)
             {
                 var parts = symbol.Elements()
@@ -2217,41 +2255,6 @@ namespace TiaMcpServer.Siemens
                     .Where(s => s.Length > 0)
                     .ToList();
                 if (parts.Count > 0) return string.Join(".", parts);
-            }
-
-            // Block / instruction call (Access Scope="Call"): faithful rendering with
-            // instance and actual parameters - these used to be dropped entirely.
-            var callInfo = access.Elements().FirstOrDefault(e => e.Name.LocalName == "CallInfo");
-            if (callInfo != null)
-            {
-                return ReconstructCallInfo(callInfo, isInstruction: false);
-            }
-
-            var instruction = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Instruction");
-            if (instruction != null)
-            {
-                return ReconstructCallInfo(instruction, isInstruction: true);
-            }
-
-            // SCL expression (e.g. an index or parenthesized term): nested token stream
-            var expression = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Expression");
-            if (expression != null)
-            {
-                var sb = new StringBuilder();
-                AppendStTokens(expression, sb);
-                return sb.ToString();
-            }
-
-            var predefined = access.Elements().FirstOrDefault(e => e.Name.LocalName == "PredefinedVariable");
-            if (predefined != null)
-            {
-                return predefined.Attribute("Name")?.Value ?? "";
-            }
-
-            var label = access.Elements().FirstOrDefault(e => e.Name.LocalName == "Label");
-            if (label != null)
-            {
-                return label.Attribute("Name")?.Value ?? "";
             }
 
             return string.Empty;

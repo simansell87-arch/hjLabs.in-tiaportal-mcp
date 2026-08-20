@@ -1,5 +1,19 @@
 # Change Log
 
+## [Unreleased]
+
+- New: SCL to LAD converter with three MCP tools - `ConvertSclToLad` (no project needed),
+  `ImportSclAsLad` and `ConvertBlockToLad` (V20+)
+- New: `Conversion/` - SCL lexer/parser, ladder model, SimaticML writer and ASCII ladder
+  preview, all independent of Openness
+- New: `Siemens/PortalBlockInterfaceProvider.cs` resolves called block interfaces from the
+  open project so call boxes get exact sections and types
+- UX: statements with no ladder equivalent are reported as diagnostics and preserved as
+  network comments instead of being dropped
+- Tests: `Test6Conversion.cs` covers lexer, parser, lowering, SimaticML output and preview,
+  and needs neither TIA Portal nor a license
+- Docs: `docs/tools/scl-to-lad.md`, README and CLAUDE.md updates
+
 ## [0.0.16] - 2025-09-02
 
 - New: ImportFromDocuments and ImportBlocksFromDocuments (V20+)

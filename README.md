@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 
 # 🏭 TIA Portal MCP Server
 
@@ -18,7 +18,7 @@
 
 <br/>
 
-[Getting Started](#-getting-started) · [Features](#-features) · [Tools](#-mcp-tools-90) · [Configuration](#-configuration) · [Contributing](#-contributing) · [Contact](#-contact)
+[Getting Started](#-getting-started) · [Features](#-features) · [Tools](#-mcp-tools-95) · [Configuration](#-configuration) · [Contributing](#-contributing) · [Contact](#-contact)
 
 <br/>
 
@@ -28,7 +28,7 @@
 
 ## 🎯 What is this?
 
-TIA Portal MCP Server is a **Model Context Protocol (MCP)** server that acts as a bridge between LLM-based coding assistants and **Siemens TIA Portal**. It exposes **90+ tools** that let AI assistants:
+TIA Portal MCP Server is a **Model Context Protocol (MCP)** server that acts as a bridge between LLM-based coding assistants and **Siemens TIA Portal**. It exposes **95+ tools** that let AI assistants:
 
 - 🔌 **Connect** to running TIA Portal instances
 - 📁 **Open, save, and manage** PLC projects
@@ -54,6 +54,7 @@ TIA Portal MCP Server is a **Model Context Protocol (MCP)** server that acts as 
 
 ### 🔧 PLC Programming
 - Export/Import blocks (XML & SIMATIC SD)
+- SCL → LAD converter with ASCII preview
 - SCL, LAD, FBD, STL support
 - Block CRUD (create, copy, move, delete)
 - Block group management
@@ -121,7 +122,7 @@ TIA Portal MCP Server is a **Model Context Protocol (MCP)** server that acts as 
 
 <br/>
 
-## 🛠️ MCP Tools (90+)
+## 🛠️ MCP Tools (95+)
 
 <details>
 <summary><b>🔌 Connection & Project Management (8 tools)</b></summary>
@@ -172,6 +173,22 @@ TIA Portal MCP Server is a **Model Context Protocol (MCP)** server that acts as 
 | `ImportBlocksFromDocuments` | Bulk import from documents (V20+) |
 | `CreateBlockGroup` | Create block folder |
 | `DeleteBlockGroup` | Delete block folder |
+
+</details>
+
+<details>
+<summary><b>🪜 SCL → LAD Conversion (3 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `ConvertSclToLad` | Convert SCL to a LAD block as SimaticML XML — no project needed |
+| `ImportSclAsLad` | Convert SCL to LAD and import it into the PLC software |
+| `ConvertBlockToLad` | Convert an SCL block that is already in the project (V20+) |
+
+Ladder cannot express everything SCL can. Statements with no ladder form are reported as
+diagnostics and preserved as network comments rather than dropped, and every conversion
+returns an ASCII ladder preview so it can be reviewed before import.
+See [`docs/tools/scl-to-lad.md`](docs/tools/scl-to-lad.md).
 
 </details>
 
@@ -383,7 +400,7 @@ Use the [TIA-Portal MCP-Server](https://marketplace.visualstudio.com/items?itemN
 │              TIA Portal MCP Server                   │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────┐ │
 │  │  MCP Layer  │→ │ Portal Layer │→ │  Openness   │ │
-│  │ (90+ Tools) │  │  (Wrapper)   │  │ (Siemens)   │ │
+│  │ (95+ Tools) │  │  (Wrapper)   │  │ (Siemens)   │ │
 │  └─────────────┘  └──────────────┘  └──────┬─────┘ │
 └─────────────────────────────────────────────┼───────┘
                                               │ COM/API
@@ -401,6 +418,10 @@ Use the [TIA-Portal MCP-Server](https://marketplace.visualstudio.com/items?itemN
 1. **MCP Layer** — Static methods with `[McpServerTool]` attributes, handles protocol mapping
 2. **Portal Wrapper** — Core wrapper around TIA Portal Openness API with standardized error handling
 3. **Openness Init** — Assembly resolution for TIA Portal V13–V20+
+
+Alongside these sits **`Conversion/`**, a self-contained SCL parser, ladder model and
+SimaticML writer with no dependency on Openness, so the SCL → LAD converter and its tests
+run without TIA Portal installed.
 
 <br/>
 
@@ -477,6 +498,8 @@ dotnet test
 - TIA Portal does not export inconsistent (uncompiled) blocks
 - Some HMI and Technology Object types require version-specific API support
 - Online value reading requires Watch Table mechanism
+- SCL → LAD conversion covers the subset of SCL that ladder can express; loops, jumps and
+  nested calculations are reported and preserved as comments instead of being converted
 
 <br/>
 

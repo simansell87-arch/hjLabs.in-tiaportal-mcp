@@ -679,4 +679,37 @@ namespace TiaMcpServer.ModelContextProtocol
     {
     }
 
+    /// <summary>One finding from the SCL to LAD conversion.</summary>
+    public class ResponseConversionDiagnostic
+    {
+        public string? Severity { get; set; }
+        public string? Code { get; set; }
+        public string? Message { get; set; }
+        public int Line { get; set; }
+        public string? Snippet { get; set; }
+    }
+
+    public class ResponseConvertSclToLad : ResponseMessage
+    {
+        public string? BlockName { get; set; }
+        public string? BlockType { get; set; }
+        public int NetworkCount { get; set; }
+        public int ConvertedStatements { get; set; }
+        public int UnsupportedStatements { get; set; }
+
+        /// <summary>ASCII ladder rendering of the converted networks.</summary>
+        public string? Preview { get; set; }
+
+        /// <summary>The SimaticML document, present only when the caller asked for it.</summary>
+        public string? Xml { get; set; }
+
+        /// <summary>Where the SimaticML document was written, when an export path was given.</summary>
+        public string? XmlPath { get; set; }
+
+        /// <summary>Path the block was imported into, when the tool imported it.</summary>
+        public string? ImportedTo { get; set; }
+
+        public IEnumerable<ResponseConversionDiagnostic>? Diagnostics { get; set; }
+    }
+
 }

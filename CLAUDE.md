@@ -1,4 +1,4 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -26,6 +26,8 @@ Three-layer design:
 2. **Portal Wrapper** (`src/TiaMcpServer/Siemens/Portal.cs`, ~2700 lines): Core wrapper around TIA Portal Openness API. Each method uses a single catch block that attaches metadata (`softwarePath`, `blockPath`, `exportPath`), logs, and rethrows as `PortalException`.
 
 3. **Openness Init** (`src/TiaMcpServer/Siemens/Openness.cs`, `Engineering.cs`): Assembly resolution for TIA Portal V13–V20+. Version-specific configuration via `--tia-major-version` CLI flag.
+
+Beside these three layers, `src/TiaMcpServer/Conversion/` holds the SCL → LAD converter: lexer, parser, ladder model, SimaticML writer and ASCII preview. It has **no dependency on Openness**, so it and its tests (`tests/TiaMcpServer.Test/Test6Conversion.cs`) run without TIA Portal. Keep it that way — project-specific data reaches it through `IBlockInterfaceProvider`, implemented by `Siemens/PortalBlockInterfaceProvider.cs`. See `docs/tools/scl-to-lad.md`.
 
 Entry point: `Program.cs` — parses CLI args (`CliOptions.cs`), initializes Openness, checks group membership, runs stdio MCP host with DI.
 

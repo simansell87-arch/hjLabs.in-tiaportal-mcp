@@ -1,4 +1,4 @@
-using ModelContextProtocol.Server;
+﻿using ModelContextProtocol.Server;
 using System.ComponentModel;
 
 namespace TiaMcpServer.ModelContextProtocol
@@ -228,6 +228,71 @@ Use the ImportBlocksFromDocuments tool with these parameters:
 - importPath: {importPath}
 - regexName: {regexName}
 - importOption: {importOption}";
+        }
+
+        #endregion
+
+        #region SCL to LAD Conversion Templates
+
+        [McpServerPrompt(Name = "ConvertSclToLad"), Description("Convert SCL source code to a LAD block")]
+        public static string ConvertSclToLad(string sclPath, string blockName, string exportPath)
+        {
+            return $@"Convert SCL source code into a Ladder (LAD) block as SimaticML XML. No project has to be open.
+
+Common parameter values:
+- sclPath: path to an .scl or .s7dcl file. Pass 'sclSource' instead to convert SCL text directly.
+- blockName: optional, defaults to the name in the SCL block header
+- blockType: optional, 'FC', 'FB' or 'OB'; defaults to the kind of the SCL block header
+- exportPath: optional file or folder for the generated XML; leave empty to skip writing a file
+
+Ladder cannot express everything SCL can. Loops, jumps and nested calculations are reported in
+'diagnostics' and preserved as empty networks whose comment carries the original SCL, so nothing is
+silently lost. Read the diagnostics and the ASCII 'preview' before importing the block.
+
+Use the ConvertSclToLad tool with these parameters:
+- sclPath: {sclPath}
+- blockName: {blockName}
+- exportPath: {exportPath}";
+        }
+
+        [McpServerPrompt(Name = "ImportSclAsLad"), Description("Convert SCL source code to LAD and import it into the plc software")]
+        public static string ImportSclAsLad(string softwarePath, string groupPath, string sclPath, string blockName)
+        {
+            return $@"Convert SCL source code into a Ladder (LAD) block and import it into the PLC software.
+
+Common parameter values:
+- softwarePath: e.g. 'PLC_1' for hardware PLC
+- groupPath: target group path, empty for the root group
+- sclPath: path to an .scl or .s7dcl file. Pass 'sclSource' instead to convert SCL text directly.
+- blockName: optional, defaults to the name in the SCL block header
+
+Because a project is open, calls of other blocks are resolved against it, so the call boxes get the
+right block type, parameter sections and parameter types.
+
+Use the ImportSclAsLad tool with these parameters:
+- softwarePath: {softwarePath}
+- groupPath: {groupPath}
+- sclPath: {sclPath}
+- blockName: {blockName}";
+        }
+
+        [McpServerPrompt(Name = "ConvertBlockToLad"), Description("Convert an SCL block in the project to LAD (V20+)")]
+        public static string ConvertBlockToLad(string softwarePath, string blockPath, string blockName)
+        {
+            return $@"Convert an SCL block that is already in the PLC software into a Ladder (LAD) block (requires TIA Portal V20 or newer).
+
+Common parameter values:
+- softwarePath: e.g. 'PLC_1' for hardware PLC
+- blockPath: full path to the SCL block, e.g. 'Program blocks/FBs/FB_Motor'
+- blockName: optional, defaults to the source block name with a '_LAD' suffix
+- import: set to true to place the result in 'groupPath'; the SCL original is never modified
+
+The SCL is read back with ExportAsDocuments, so the source block must be consistent (compiled).
+
+Use the ConvertBlockToLad tool with these parameters:
+- softwarePath: {softwarePath}
+- blockPath: {blockPath}
+- blockName: {blockName}";
         }
 
         #endregion
